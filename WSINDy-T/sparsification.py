@@ -1,61 +1,9 @@
 """
-TT-MSTLS, TT-STLS, and associated helper methods
+TT-STLS and TT-MSTLS
 """
 import numpy as np
 import numpy.linalg as la
 from scikit_tt.tensor_train import TT
-
-def coarse_supp(W, lamb):
-    """
-    Use coefficient tensor W and thresholding parameter
-    lamb to reduce Theta
-
-    Parameters
-    ----------
-    TODO
-    """
-    D = W.order
-    supp = [None]*(D)
-    for d in range(D):
-        core = np.abs(W.cores[d])
-        supp[d] = np.all(
-            core >= lamb and core <= lamb**-1,
-            axis=1
-        )
-    return supp
-
-def apply_supp(Theta, supp):
-    """
-    TODO
-    """
-    # Use supp to reduce Theta
-    D = Theta.order
-    Tp_cores = [None]*(D)
-    Tp_cores[D-1] = Theta.cores[D-1] #weak core
-    for d in range(D - 1):
-        # R_d-1 x len(supp[d]) x 1 x R_d
-        Tp_cores[d] = Theta.cores[d][:, supp[d], :, :]
-    Tp = TT(Tp_cores)
-
-    return Tp
-
-def TT_regress(Theta, x, threshold=0.0):
-    """
-    compute pseudoinverse of feature matrix, apply x
-    and threshold
-
-    Parameters
-    ----------
-    TODO
-    """
-    D = Theta.order
-    W = Theta.pinv(D-1, threshold=threshold) #D-1 is dim of system
-    W.cores[D-1] = (
-        W.cores[D-1].reshape([W.ranks[D-1], Theta.shape[D-1]])
-    ).dot(x).reshape(W.ranks[D-1], 1, 1, 1)
-    W.row_dims[D-1] = 1
-    
-    return W
 
 def TT_STLS(Theta, x, lamb, eps):
     """
@@ -129,11 +77,9 @@ def STLS(A, b, lamb):
     # TODO update with more specific bounds,
     #   more Seth's code and Dan's paper
 
-
-
     return NotImplementedError
 
-def TT_MSTLS(Theta, x, lambs, L, eps):
+def TT_MSTLS(Theta, x, lambs, eps):
     """
     TODO
     """
