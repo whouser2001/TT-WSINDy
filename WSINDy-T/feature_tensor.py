@@ -46,7 +46,6 @@ def feature_cores(X, f):
         for d in range(1,D):
             for m in range(M):
                 cores[d][m, j, 0, m] = fX[d,m]
-
     return cores
 
 def strong_core(M):
@@ -54,7 +53,7 @@ def strong_core(M):
 
 def weak_core(M, phi):
     Iphi = correlate(
-        np.eye(M), np.reshape(1,phi.size)
+        np.eye(M), np.expand_dims(phi, axis=0), mode='valid'
     )
     return Iphi.reshape(M,Iphi.shape[1],1,1)
 
@@ -80,6 +79,7 @@ def feature_tensor(X,f,phi=None):
     """
     M = X.shape[1]
     cores = feature_cores(X,f)
-    if phi == None:
-        return TT(cores.append(strong_core(M)))
-    return TT(cores.append(weak_core(M,phi)))
+    if phi is None: cores.append(strong_core(M))
+    else: cores.append(weak_core(M,phi))
+
+    return TT(cores)
