@@ -7,20 +7,13 @@ import copy
 from feature_tensor import feature_tensor
 from test_function import piecewise_polynomial
 from scipy.signal import correlate
-from dysts.flows import Lorenz
+from dysts.flows import LorenzCoupled
 
 if __name__ == '__main__':
-    D = 3
+    D = 6
     M = 100 #note that TT-SVD is slower, for this many time points
-    model = Lorenz(
-        parameters = {
-            'beta' : 10,
-            'rho' : 28,
-            'sigma' : 8/3
-        },
-        ic = [2,1,1]
-    )
-    X = np.array(model.make_trajectory(M)).transpose() # (3, 10)
+    model = LorenzCoupled()
+    X = np.array(model.make_trajectory(n=M)).transpose() # (6, 100)
     f = [
         lambda x : 1,
         lambda x : x,
@@ -34,7 +27,7 @@ if __name__ == '__main__':
     Mp = M - len(phi) + 1
     ThetaX = feature_tensor(X,f,phi=phi)
 
-    thresh = 0
+    thresh = 0.0
     lamb = 0.01
     Theta = feature_tensor(X,f,
                            threshold=thresh,
@@ -54,5 +47,5 @@ if __name__ == '__main__':
             ThetaD.TT_STLS(Yd, lamb)
         )
         suppd = ThetaD.all_active_features()
-        print(suppd)
+
     # See results
