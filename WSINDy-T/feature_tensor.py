@@ -147,23 +147,16 @@ class feature_tensor(TT):
         Wcores = W.cores
         Wmodes = W.row_dims
         Wranks = W.ranks
-
-        # Threshold cores
-        for d in range(D):
-            W.cores[d] = np.abs(W.cores[d])
-            W.cores[d][
-                (W.cores[d] <= lamb) | (W.cores[d] >= 1/lamb)
-            ] = 0 #TODO: revise this condition
         
         # Accumulate right density matrices
         DRs = [None]*(D-1) #D_R^1, ..., D_R^(D-1), D_R^(D)
 
         for d in range(D-2,-1,-1):
 
-            DR = np.zeros((Wranks[d], Wranks[d])) # running sum
-            for j in range(Wmodes[d]):
+            DR = np.zeros((Wranks[d+1], Wranks[d+1])) # running sum
+            for j in range(Wmodes[d+1]):
 
-                Wdj = np.squeeze(Wcores[d][:,j,:,:])
+                Wdj = Wcores[d+1][:,j,:,:].squeeze(axis=1)
                 if d == D-2: DR += Wdj @ Wdj.T
                 else: DR += Wdj @ DRs[d+1] @ Wdj.T
 
@@ -178,15 +171,18 @@ class feature_tensor(TT):
             supp[d] = np.zeros(Wmodes[d], dtype=bool)
             for j in range(Wmodes[d]):
 
-                Wdj = np.squeeze(Wcores[d][:,j,:,:])
-                if DLm1 is None: S = Wdj.T @ Wdj
-                else: S = Wdj.T @ DLm1 @ Wdj
+                Wdj = Wcores[d][:,j,:,:].squeeze(axis=1)
+                S = np.zeros((Wranks[d+1],Wranks[d+1]))
+                if DLm1 is None: S += Wdj.T @ Wdj
+                else: S += Wdj.T @ DLm1 @ Wdj
                 DL += S
 
-                if d - 1 == len(DRs):
-                    s = np.sum(S)
-                else: s = np.sum(S * DRs[d-1])
-                if s: supp[d][j] = 1
+                if d == D - 1: A = S.copy()
+                else: A = S * DRs[d]
+
+                # threshold intermediate matrix A
+                A[(np.abs(A) <= lamb) | (np.abs(A) >= 1/lamb)] = 0
+                if np.sum(A) > 0: supp[d][j] = 1
 
             DLm1 = DL
 
@@ -287,7 +283,7 @@ class feature_tensor(TT):
             print(f'Starting TT-STLS')
             print('----------------')
             print(f'Number of basis functions: {J}')
-            print(f'Initial support size: {sum(sum(s) for s in supp)}')
+            print(f'Initial support size: {self.supp_size(supp)}')
             print(f'Number of time points: {self.snapshots}')
             print('----------------')
             st = time()
@@ -307,17 +303,17 @@ class feature_tensor(TT):
 
             if self.verbose:
                 print(f'Iteration {i}:')
-                print(f'Support size: {sum(sum(s) for s in supp)}')
+                print(f'Support size: {self.supp_size(supp)}')
                 print('----------------')
 
             # supp is montonically decreasing. So only need to compare
             #   to size of previous support
-            if sum(sum(s) for s in supp) == sum(sum(s) for s in supp_prev):
+            if self.supp_size(supp) == self.supp_size(supp_prev):
                 break
             i += 1
 
         if self.verbose:
-            print(f'Finished TT-STLS in {i} iterations, with final support size {sum(s.sum() for s in supp)}')
+            print(f'Finished TT-STLS in {i} iterations, with final support size {self.supp_size(supp)}')
             print(f'Time elapsed: {time() - st:.2f} seconds')
             print(supp)
 
@@ -344,4 +340,9 @@ class feature_tensor(TT):
         ).transpose() # (prod(J_d), M)
 
         return Theta_flat
-
+    
+    def supp_size(self, supp):
+        """
+        Utility function, gives support size
+        """
+        return np.prod([s.sum() for s in supp])
