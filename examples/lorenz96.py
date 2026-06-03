@@ -14,9 +14,9 @@ from scipy.signal import correlate
 from scipy.integrate import odeint
 
 if __name__ == '__main__':
-    D = 5  # Dimension of system
+    D = 20  # Dimension of system
     F = 8  # Forcing
-    M = 1000 # num timepoints
+    M = 10000 # num timepoints
 
     def L96(x, t):
         """Lorenz 96 model with constant forcing"""
@@ -24,24 +24,25 @@ if __name__ == '__main__':
 
     x0 = F * np.ones(D)  # Initial state (equilibrium)
     x0[0] += 0.01  # Add small perturbation to the first variable
-    t = np.linspace(0.0, 30.0, M)
+    tn = 10
+    t = np.linspace(0.0, tn, M)
 
     X = odeint(L96, x0, t).T
     f = [
         lambda x : 1,
         lambda x : x,
-        lambda x : x**2, # superfluous basis feature
+        lambda x : x**2 # superfluous basis feature
     ]
 
     # Make (weak) feature tensor
     phi, dphi = piecewise_polynomial(
-        0.5, 16, 0, 10, M
+        tn/20, 16, 0, tn, M
     )
     Mp = M - len(phi) + 1
     ThetaX = feature_tensor(X,f,phi=phi)
 
     thresh = 0
-    lamb = 10**-5
+    lamb = 0.25
     Theta = feature_tensor(X,f,
                            threshold=thresh,
                            phi=phi,
@@ -54,6 +55,12 @@ if __name__ == '__main__':
     # Apply TT-STLS, for each dimension separately
     W = []
     for d in range(Y.shape[1]):
+        print('--------')
+        print('--------')
+        print('dim = {}'.format(d+1))
+        print('--------')
+        print('--------')
+
         ThetaD = copy.deepcopy(Theta)
         Yd = Y[:,d]
         W.append(

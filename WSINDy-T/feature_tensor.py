@@ -40,8 +40,6 @@ class feature_tensor(TT):
         f : list
             List of candidate functions
             fj : R -> R
-        threshold : float
-            Threshold for pseudoinverse of feature tensor
         phi : np.array
             discretization of compactly supported test function
             as a vector. If strong form, phi = None
@@ -60,6 +58,8 @@ class feature_tensor(TT):
             number of time points in data
         dims : int
             number of dimensions in data
+        feature_norms : np.array
+            tracking of per-slice norms
         """
         J = len(f)
         D,self.snapshots = X.shape
@@ -69,11 +69,21 @@ class feature_tensor(TT):
         # initialize blank cores
         cores = [np.zeros([1, J, 1, M])] + [np.zeros([M, J, 1, M]) for _ in range(D-1)]
 
+        # norm tracking
+        norms = np.zeros((J,D))
+
         # fill in cores with candidate functions
         for j in range(J):
 
             # evaluate dataset on fj
             fX = np.vectorize(f[j])(X)
+            fX = fX.astype(float)
+
+            # Perform per-dim normalization and store norms for later
+            for d in range(D):
+                nrm = np.linalg.norm(fX[d,:])
+                norms[j,d] = nrm if nrm > 0 else 1.0
+                fX[d,:] /= norms[j,d]
 
             # fill in slice of first core
             cores[0][0, j, 0, :] = fX[0, :]
@@ -101,9 +111,9 @@ class feature_tensor(TT):
         self.supp_indices = [np.arange(J) for _ in range(D)]
 
         # other metadata
-        self.threshold = threshold
         self.verbose = verbose
         self.Mp = M - len(phi) + 1 if phi is not None else M # final mode
+        self.feature_norms = norms
         
     def all_active_features(self):
         """
@@ -120,7 +130,7 @@ class feature_tensor(TT):
         active_features = [self.supp_indices[d] for d in range(D)]
         return active_features
     
-    def coarse_supp(self, W, lamb):
+    def coarse_supp(self, W, lamb, bound):
         """
         Compute coarse support of W, by thresholding each core.
 
@@ -135,6 +145,8 @@ class feature_tensor(TT):
             contracting into the rest of the tensor train
         lamb : float
             Thresholding parameter
+        bound : float
+            ||x||_2/||Theta||_2
 
         Returns
         -------
@@ -167,6 +179,7 @@ class feature_tensor(TT):
         for d in range(D):
             
             DL = np.zeros((Wranks[d+1], Wranks[d+1]))
+            weights = np.zeros(Wmodes[d])
 
             supp[d] = np.zeros(Wmodes[d], dtype=bool)
             for j in range(Wmodes[d]):
@@ -177,14 +190,25 @@ class feature_tensor(TT):
                 else: S += Wdj.T @ DLm1 @ Wdj
                 DL += S
 
-                if d == D - 1: A = S.copy()
-                else: A = S * DRs[d]
-
-                # threshold intermediate matrix A
-                A[(np.abs(A) <= lamb) | (np.abs(A) >= 1/lamb)] = 0
-                if np.sum(A) > 0: supp[d][j] = 1
+                if d == D - 1: 
+                    weights[j] = max(0.0,float(np.sum(S)))
+                else: 
+                    weights[j] = max(0.0, float(np.sum(S * DRs[d])))
 
             DLm1 = DL
+
+            # Scalar threshold against the band
+            LB = lamb
+            weights /= weights.max()
+            keep = (weights > LB)
+
+            # Safeguard: never empty a dimension — keep the argmax
+            if not keep.any() and Wmodes[d] > 0:
+                keep[int(np.argmax(weights))] = True
+            supp[d] = keep
+
+            if self.verbose:
+                print(f"  d={d}: weights={weights}, LB={LB:.3e}")
 
         return supp
                 
@@ -217,12 +241,10 @@ class feature_tensor(TT):
         self.cores = cores_prime
 
 
-    def TT_PI(self, x):
+    def TT_PI(self, x, threshold=0):
         """
         Find pseudoinverse of feature tensor, regress
         against x and threshold down ranks, if applicable.
-
-        Computes W^T
 
         Parameters
         ----------
@@ -233,19 +255,30 @@ class feature_tensor(TT):
         -------
         W : TT
             Pseudoinverse of feature tensor
+        smax : float
+            largest singular value of self, which
+            is also the 2-norm of the right-unfolding
 
         Raises
         ------
         ValueError
             if vector x does not have length self.shape[-1]
         """
-        D = self.order - 1
-        W = self.pinv(D, threshold=self.threshold) #D is dim of system
-
         if x.shape[0] != self.Mp:
             raise ValueError(
                 f"Vector x must have length {self.Mp}, but has length {x.shape[0]}"
             )
+
+        D = self.order - 1
+        # reimplementation of self.pinv, so that we can extract
+        # the 2-norm of self from the SVD for later
+        U, Sigma, V = self.svd(D, threshold=threshold,
+                       ortho_l=True, ortho_r=True, overwrite=False)
+        s = Sigma[0]
+        Wcores = U.cores + V.cores
+        Wcores[D] = np.tensordot(np.diag(np.reciprocal(Sigma)),
+                                 Wcores[D], axes=(1,0))
+        W = TT(Wcores)
         
         # contract vector with last core of W
         W.cores[-1] = (W.cores[-1].reshape(W.ranks[-2], W.row_dims[-1])).dot(x.T).reshape(W.ranks[-2],1)
@@ -255,9 +288,10 @@ class feature_tensor(TT):
         W.cores[-2] = W.cores[-2]@W.cores[-1]
         W.cores.pop(-1)
         W.row_dims.pop(-1)
-        return W
+        W.order -= 1
+        return W, s
 
-    def TT_STLS(self, x, lamb):
+    def TT_STLS(self, x, lamb, threshold=0):
         """
         Tensor-train squential thresholding least squares (TT-STLS)
 
@@ -296,10 +330,13 @@ class feature_tensor(TT):
             supp_prev = supp
             
             # compute coefficient estimate
-            W = self.TT_PI(x)
-            supp = self.coarse_supp(W, lamb)
+            W,s = self.TT_PI(x, threshold)
+
+            # Compute & apply supp
+            supp = self.coarse_supp(W, lamb,
+                                    np.linalg.norm(x)/s)
             self.apply_supp(supp)
-            #print(supp)
+            print(self.all_active_features())
 
             if self.verbose:
                 print(f'Iteration {i}:')
@@ -308,14 +345,39 @@ class feature_tensor(TT):
 
             # supp is montonically decreasing. So only need to compare
             #   to size of previous support
-            if self.supp_size(supp) == self.supp_size(supp_prev):
+            if self.supp_size(supp) == self.supp_size(supp_prev) or \
+                self.supp_size(supp) == 1:
                 break
             i += 1
 
         if self.verbose:
             print(f'Finished TT-STLS in {i} iterations, with final support size {self.supp_size(supp)}')
             print(f'Time elapsed: {time() - st:.2f} seconds')
-            print(supp)
+            #print(supp)
+
+        # unscale each core slice   
+        W = self.unscale(W)
+
+        return W
+    
+    def unscale(self, W):
+        """
+        Unscale each core slice of W by the norms of the corresponding features.
+
+        Parameters
+        ----------
+        W : TT
+            Coefficient tensor estimate, with cores scaled by feature norms
+
+        Returns
+        -------
+        W_unscaled : TT
+            Coefficient tensor estimate, with cores unscaled by feature norms
+        """
+        for d in range(W.order):
+            for j in range(W.row_dims[d]):
+                orig_j = self.supp_indices[d][j]
+                W.cores[d][:,j,:,:] *= self.feature_norms[orig_j,d]
 
         return W
 
@@ -345,4 +407,4 @@ class feature_tensor(TT):
         """
         Utility function, gives support size
         """
-        return np.prod([s.sum() for s in supp])
+        return np.prod([np.max([s.sum(),1]) for s in supp])

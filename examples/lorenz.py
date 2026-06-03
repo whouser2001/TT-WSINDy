@@ -35,7 +35,7 @@ if __name__ == '__main__':
     ThetaX = feature_tensor(X,f,phi=phi)
 
     thresh = 0
-    lamb = 0.01
+    lamb = 0.000001
     Theta = feature_tensor(X,f,
                            threshold=thresh,
                            phi=phi,
