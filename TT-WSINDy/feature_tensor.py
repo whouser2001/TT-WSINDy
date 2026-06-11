@@ -25,7 +25,27 @@ class feature_tensor(TT):
 
     Methods
     -------
-    TODO
+    all_active_features
+        Return list of active basis features in each dimension
+    coarse_supp(W, lambda)
+        Compute coarse support of W
+    apply_supp(supp)
+        Given coarse support, reduce feature tensor to only those
+        features
+    TT_PI(x, threshold)
+        Perform TT pseudoinverse regression against x, and truncate
+        constituent SVDs according to threshold
+    TT_STLS(x, lambda, threshold)
+        Tensor-train sequential thresholding least squares
+    unscale(W)
+        Utility function to unscale coefficient estimate.
+        For numerical stability
+    eject
+        Return flattened feature tensor and space of induced 
+        feature functions
+    supp_size(supp)
+        Utility function to get the size of the induced support,
+        given a basis
 
     References
     ----------
@@ -130,9 +150,9 @@ class feature_tensor(TT):
         active_features = [self.supp_indices[d] for d in range(D)]
         return active_features
     
-    def coarse_supp(self, W, lamb, bound):
+    def coarse_supp(self, W, lamb):
         """
-        Compute coarse support of W, by thresholding each core.
+        Compute coarse support of W
 
         Parameters
         ----------
@@ -199,6 +219,7 @@ class feature_tensor(TT):
 
             # Scalar threshold against the band
             LB = lamb
+            #weights **= 2
             weights /= weights.max()
             keep = (weights > LB)
 
@@ -270,8 +291,8 @@ class feature_tensor(TT):
             )
 
         D = self.order - 1
-        # reimplementation of self.pinv, so that we can extract
-        # the 2-norm of self from the SVD for later
+
+        # self.pinv
         U, Sigma, V = self.svd(D, threshold=threshold,
                        ortho_l=True, ortho_r=True, overwrite=False)
         s = Sigma[0]
@@ -281,15 +302,12 @@ class feature_tensor(TT):
         W = TT(Wcores)
         
         # contract vector with last core of W
-        W.cores[-1] = (W.cores[-1].reshape(W.ranks[-2], W.row_dims[-1])).dot(x.T).reshape(W.ranks[-2],1)
-        W.row_dims[-1] = 1
+        last = (W.cores[-1].reshape(W.ranks[-2], W.row_dims[-1])).dot(x.T).reshape(W.ranks[-2],1)
 
         # Collapse the final core into rest of tensor
-        W.cores[-2] = W.cores[-2]@W.cores[-1]
-        W.cores.pop(-1)
-        W.row_dims.pop(-1)
-        W.order -= 1
-        return W, s
+        next_last = W.cores[-2]@last
+        W = TT(W.cores[:-2] + [next_last]) # auto update attributes
+        return W
 
     def TT_STLS(self, x, lamb, threshold=0):
         """
@@ -330,13 +348,11 @@ class feature_tensor(TT):
             supp_prev = supp
             
             # compute coefficient estimate
-            W,s = self.TT_PI(x, threshold)
+            W = self.TT_PI(x, threshold)
 
             # Compute & apply supp
-            supp = self.coarse_supp(W, lamb,
-                                    np.linalg.norm(x)/s)
+            supp = self.coarse_supp(W, lamb)
             self.apply_supp(supp)
-            print(self.all_active_features())
 
             if self.verbose:
                 print(f'Iteration {i}:')
@@ -355,7 +371,8 @@ class feature_tensor(TT):
             print(f'Time elapsed: {time() - st:.2f} seconds')
             #print(supp)
 
-        # unscale each core slice   
+        # Recompute W on converged support and unscale
+        W = self.TT_PI(x, threshold)
         W = self.unscale(W)
 
         return W
@@ -381,28 +398,6 @@ class feature_tensor(TT):
 
         return W
 
-    def flatten(self):
-        """
-        Flatten feature tensor to a 2D array, with shape
-        (prod(J_d), M)
-
-        Also flatten the index map, so that we can track which features are active
-         after flattening.
-
-        Returns
-        -------
-        Theta_flat : np.array
-            Flattened feature tensor, with shape (prod(J_d), M)
-        
-        """
-        D = self.order - 1
-        Theta_full = self.full().squeeze() # (J_0, ..., J_{D-1}, M)
-        Theta_flat = np.moveaxis(Theta_full, D, 0).reshape(
-            self.shape[-1], -1
-        ).transpose() # (prod(J_d), M)
-
-        return Theta_flat
-    
     def supp_size(self, supp):
         """
         Utility function, gives support size

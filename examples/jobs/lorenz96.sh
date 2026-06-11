@@ -13,4 +13,4 @@ module load anaconda
 
 conda activate torch_env
 
-python lorenz96.py
+python lorenz96/l96-ttwsindy.py
