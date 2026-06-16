@@ -18,7 +18,7 @@ from scipy.integrate import odeint
 if __name__ == '__main__':
     D = 5       # Dimension of system
     F = 8       # Forcing
-    M = 500    # num timepoints
+    M = 5000     # num timepoints
 
     def L96(x, t):
         """Lorenz 96 model with constant forcing"""
@@ -38,14 +38,52 @@ if __name__ == '__main__':
     J = len(f)
 
     # Lambdas range
-    denom = 10
+    denom = 20
     TTlambs = 10**(
-        (3.7/(denom))*np.arange(0,denom+1) - 4
+       (8/(denom))*np.arange(0,denom+1) - 8
     )
+    #TTlambs = np.linspace(0.1, 1, 50)
     num = 25
     flatlambs = np.linspace(
-        10**(-10), 2.5*10**(-8), num
+        10**(-11), 2.5*10**(-6), num
     )
 
-    TT_WSINDy(X, 0, tn, f, TTlambs, flatlambs, verbose=True)
+    eps = 10**(-22)
+    results = TT_WSINDy(X, 0, tn, f, TTlambs, flatlambs, verbosity=2,
+              threshold=eps)
+    
+    supps = results[1]
+    feature_maps = results[2]
+    print(results[-1])  #coarse supps
+    # print(supp)
+    # print(feature_maps)
+
+    fstr = [lambda n : '',
+            lambda n : f'x_{n}',
+            lambda n : f'x_{n}^2']
+    for d1 in range(D):
+
+        supp = supps[d1]
+        feature_map = feature_maps[d1]
+        str = f'x_{d1 + 1}\' = '
+
+        for k in supp:
+            substr = ''
+            for d2 in range(D):
+                substr += fstr[feature_map[k][d2]](d2+1)
+            if substr == '': substr += '1'
+            str += substr
+            if k != supp[-1]: str += ' + '
         
+        print(str)
+    # for d in range(D):
+    #     str = f'x_{d}\' = '
+    #     for k in range(len(supp[d])):
+    #         substr = ''
+    #         for l in range(len(feature_maps[d][supp[d][k]])):
+    #             for dj in range(D):
+    #                 substr += fstr[feature_maps[d][supp[d][k]][l]](dj)
+    #         if substr == '': substr += '1'
+    #         str += substr
+    #     str += f' + '
+    #     print(str)

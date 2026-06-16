@@ -42,7 +42,7 @@ if __name__ == '__main__':
         tn/20, 16, 0, tn, M
     )
     Mp = M - len(phi) + 1
-    thresh = 0
+    thresh = 10**(-10)
     Theta = feature_tensor(X,f,
                            threshold=thresh,
                            phi=phi,

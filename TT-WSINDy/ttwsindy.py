@@ -15,59 +15,90 @@ import sparsification
 import itertools
 
 def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
-                testfn=('piecewise_polynomial', 1/20, 16), 
+                testfn=('piecewise_polynomial', 1/20, 16, 1), 
                 loss='default',
                 threshold=0.0,
-                verbose=False):
+                verbosity=0):
     """
     TT-WSINDy.
-
+ 
+    Discover the governing equations of a dynamical system from data using
+    weak-form SINDy with tensor-train sparsification: a coarse TT-MSTLS pass
+    per dimension, followed by a fine matrix MSTLS solve.
+ 
     Parameters
     ----------
-    X : np.array
-        Data matrix, size M x D
-    t0,tM : float
-        initial and final timepoint. Data is assumed to be
-        equispaced in time.
-    f : list
-        List of basis features fj : R -> R
+    X : np.ndarray
+        Data matrix, shape D x M (D system dimensions, M time points).
+    t0, tM : float
+        Initial and final time point. Data is assumed equispaced in time.
+    f : list of callable
+        Candidate functions fj : R -> R.
     TTlambs : iterable
-        lambda values to test over in TT-MSTLS
+        Threshold values to test in TT-MSTLS.
     flatlambs : iterable
-        lambda values to test over in MSTLS
+        Threshold values to test in the flat MSTLS.
     testfn : tuple
-        information that informs construction of the test function
-        tuple structured like (name, *parameters). Currently suported:
+        Test-function specification, structured as (name, *parameters).
+        Currently supported:
             1.  name : piecewise_polynomial
                 r : float
-                    real number in (0,1] that gives the ratio of time
-                    interval that test function spans
+                    real number in (0, 1] giving the fraction of the time
+                    interval the test function spans
                 p : int
                     degree of the polynomial
-    loss : string
-        specifies loss function. Currently supported
+                o : int
+                    order of the ODE to be discovered. An oth-order ODE
+                    requires 'dphi' to be the oth-order derivative.
+    loss : str
+        Loss function. Currently supported:
             1. name : default
     threshold : float
-        truncation parameter to be applied to matrix SVDs of TT-PI. 
-        setting threshold=0.0 means pseudoinverses are computed exactly.
-    verbose : bool
-        toggle print statements during execution
+        Truncation parameter applied to the matrix SVDs in TT-PI.
+        threshold=0.0 computes pseudoinverses exactly.
+    verbosity : int
+        Print verbosity during execution:
+            0 : print nothing
+            1 : print coarse supports, final support, and walltime
+                information (verbose)
+            2 : additionally print weights, support, and loss at every
+                tested lambda (debug)
+ 
+    Returns
+    -------
+    W : list of np.ndarray
+        Per-dimension coefficient vectors on the surviving features.
+    supp : list of np.ndarray
+        Per-dimension surviving column indices into each feature map.
+    feature_maps : list of list of tuple
+        feature_maps[d][k] gives the original candidate-function index in
+        each dimension for the k-th column of dimension d's library.
+    ttwsindy_time : float
+        Total wall-clock runtime.
+    tt_mstls_time : float
+        Cumulative TT-MSTLS runtime across dimensions.
+    mstls_time : float
+        Cumulative flat-MSTLS runtime across dimensions.
+    coarse_supps : list of list of np.ndarray
+        Per-dimension coarse supports from TT-MSTLS.
     """
     D = X.shape[0]
     M = X.shape[1]
     J = len(f)
     problemSize = J**D
 
-    if verbose: st = time()
+    verbose = (verbosity >= 1)
+    debug = (verbosity//2 >= 1)
 
-    # testfn = (name, *args)
+    st = time()
+
     if testfn[0] == 'piecewise_polynomial':
         radius = (tM - t0)*testfn[1]
         degree = testfn[2]
         phi, dphi = test_function.piecewise_polynomial(
-            radius, degree, t0, tM, M
+            radius, degree, t0, tM, M, order=testfn[3]
         )
-    elif testfn == 'Cinfty_bump':
+    elif testfn[0] == 'Cinfty_bump':
         return NotImplementedError
     else:
         return NotImplementedError
@@ -75,55 +106,56 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
     Theta = feature_tensor(X, f, 
                             threshold=threshold,
                             phi=phi,
-                            verbose=verbose)
+                            verbose=debug)
     
-    # Compute LHS
+    # compute the weak-form left-hand side
     phi = np.expand_dims(phi, axis=0)
     dphi = np.expand_dims(dphi,axis=0)
-    Y = correlate(X, dphi, mode='valid').transpose()    # (Mp, D)
+    Y = -1*correlate(X, dphi, mode='valid').transpose()    # (Mp, D)
 
-    # store results
+    # store per-dimension results
     W = []
     supp = []
+    feature_maps = []
+    coarse_supps = []
 
     # TODO add functionality to run these loops in parallel
-    # TODO currently doing just 1 dim for debugging
     tt_mstls_time = 0
     mstls_time = 0
     for d in range(D):
-    #for d in range(1):
 
         if verbose:
             print('--------')
             print('dim = {}'.format(d))
             print('--------')
         
-        # TT-MSTLS
+        # coarse pass: TT-MSTLS
         Theta_d = copy.deepcopy(Theta)
 
-        if verbose: tt_mstls_st = time()
+        tt_mstls_st = time()
 
         y_d = Y[:,d]
         Theta_star, wStar, suppStar = sparsification.TT_MSTLS(
-            Theta_d, y_d, TTlambs, problemSize, verbose=verbose
+            Theta_d, y_d, TTlambs, problemSize, verbose=debug
         )
-
+        
+        tt_mstls_end = time()
         if verbose:
-            tt_mstls_end = time()
             print('--------')
-            print('TT-MSTLS concluded.')
+            print(f'TT-MSTLS concluded for d = {d}')
             print(f'coarse support: {suppStar}')
             print('Beginning flat MSTLS')
             print('--------')
 
         coarse_supp = Theta_star.all_active_features()
+        coarse_supps.append(coarse_supp)
         feature_map = list(itertools.product(*coarse_supp))
         basis = np.unique(
             np.concatenate(coarse_supp)
         )
         Jtilde = len(feature_map)
 
-        # Reconstruct WSINDy matrix G from surviving features
+        # reconstruct WSINDy matrix G from surviving features
         basis_data = np.zeros((basis.size, D, M))
         for i in range(basis.size):
             j = basis[i]
@@ -132,40 +164,38 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
         G = np.zeros((Jtilde, M))           # prod(Jd) x M
         for k in range(Jtilde):
             gk = np.ones(M)
-            for d in range(D):
-                gk *= basis_data[feature_map[k][d], d, :]
+            for dee in range(D):
+                gk *= basis_data[feature_map[k][dee], dee, :]
             G[k, :] = gk
 
         G = correlate(G, phi, mode='valid').transpose()
 
-        if verbose: mstls_st = time()
+        mstls_st = time()
 
-        # MSTLS
+        # fine pass: MSTLS
         wStar, suppStar = sparsification.MSTLS(
-            G, y_d, flatlambs, verbose=verbose
+            G, y_d, flatlambs, verbose=0
         )
 
-        if verbose: mstls_end = time()
+        mstls_end = time()
 
         W.append(wStar)
         supp.append(suppStar)
-
-        print([[base.item() for base in feature] for feature in feature_map])
+        feature_maps.append(feature_map)
+        
         tt_mstls_time += tt_mstls_end - tt_mstls_st
         mstls_time += mstls_end - mstls_st
 
-
+    ttwsindy_time = time() - st
     if verbose:
-        end = time()
         print('------------------')
         print('TT-WSINDy complete.')
-        print(f'Total runtime: {end - st}')
+        print(f'Total runtime: {ttwsindy_time}')
         print(f'TT-MSTLS runtime: {tt_mstls_time}')
         print(f'MSTLS runtime: {mstls_time}')
         for d in range(D):
-        #for d in range(1):
             # TODO: print in terms of original features, instead
             print(f'dim {d} support: {supp[d]}')
         print('------------------')
 
-    return wStar, suppStar
+    return W, supp, feature_maps, ttwsindy_time, tt_mstls_time, mstls_time, coarse_supps

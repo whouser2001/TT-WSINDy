@@ -8,78 +8,77 @@ from scipy.signal import correlate
 
 class feature_tensor(TT):
     """
-    Construct list of feature cores from data 
-    and candidate functions. Extends the TT 
-    (tensor train) class from scikit-tt
+    Build a tensor train of feature cores from data and a list of
+    candidate functions. Extends the TT (tensor train) class from
+    scikit-tt.
 
     Parameters
     ----------
-    X : np.array
-        Raw data with shape D x M
-    f : list
-        List of candidate functions
-        fj : R -> R
-    phi : np.array
-        discretization of compactly supported test function
-        as a vector. If strong form, phi = None
+    X : np.ndarray
+        Raw data, shape D x M (D system dimensions, M time points).
+    f : list of callable
+        Candidate functions fj : R -> R.
+    phi : np.ndarray or None
+        Discretization of a compactly supported test function, as a
+        vector. None selects the strong form.
 
     Methods
     -------
-    all_active_features
-        Return list of active basis features in each dimension
-    coarse_supp(W, lambda)
-        Compute coarse support of W
+    all_active_features()
+        Active candidate functions in each dimension.
+    support_key()
+        Hashable key identifying the current support state.
+    compute_weights(W)
+        Per-mode importance weights from a coefficient tensor
+        (independent of the threshold lamb).
+    threshold_weights(weights, lamb)
+        Threshold cached weights into a support mask.
+    coarse_supp(W, lamb)
+        Coarse support of W at threshold lamb.
     apply_supp(supp)
-        Given coarse support, reduce feature tensor to only those
-        features
+        Reduce the feature tensor to the features in supp.
     TT_PI(x, threshold)
-        Perform TT pseudoinverse regression against x, and truncate
-        constituent SVDs according to threshold
-    TT_STLS(x, lambda, threshold)
-        Tensor-train sequential thresholding least squares
+        TT pseudoinverse regression against x, with optional SVD
+        rank truncation.
+    TT_STLS(x, lamb, threshold, weight_cache)
+        Tensor-train sequential thresholding least squares.
     unscale(W)
-        Utility function to unscale coefficient estimate.
-        For numerical stability
-    eject
-        Return flattened feature tensor and space of induced 
-        feature functions
+        Undo the per-feature normalization of a coefficient estimate.
     supp_size(supp)
-        Utility function to get the size of the induced support,
-        given a basis
-
-    References
-    ----------
+        Size of the support induced by a mask.
     """
 
     def __init__(self, X, f, threshold=0, phi=None, verbose=False):
         """
         Parameters
         ----------
-        X : np.array
-            Raw data with shape D x M
-        f : list
-            List of candidate functions
-            fj : R -> R
-        phi : np.array
-            discretization of compactly supported test function
-            as a vector. If strong form, phi = None
+        X : np.ndarray
+            Raw data, shape D x M (D system dimensions, M time points).
+        f : list of callable
+            Candidate functions fj : R -> R.
+        phi : np.ndarray or None
+            Discretization of a compactly supported test function, as a
+            vector. None selects the strong form.
         verbose : bool
-            If True, print out debugging statements during construction
+            If True, print progress/debugging information.
 
-        Attributes (in addition to TT attributes)
+        Attributes (beyond those provided by TT)
         ----------
-        supp_indices : list of np.array
-            supp_indices[d] maps shrunk feature index back to original
-            for d = 0, ..., D-2 (excluding weak/strong core)
-            initialized to identity, all J features active in each dimension
         verbose : bool
-            If True, print out debugging statements during construction
+            If True, print progress/debugging information.
         snapshots : int
-            number of time points in data
-        dims : int
-            number of dimensions in data
-        feature_norms : np.array
-            tracking of per-slice norms
+            Number of time points (M) in the data.
+        Mp : int
+            Length of the final (weak/strong) mode. Equals M for the
+            strong form, or M - len(phi) + 1 for the weak form.
+        feature_norms : np.ndarray
+            Per-(candidate function, dimension) normalization factors,
+            shape (J, D).
+        supp_indices : list of np.ndarray
+            supp_indices[d] maps each surviving feature in dimension d
+            back to its index in the original candidate-function list,
+            for d = 0, ..., D-1 (the weak/strong core is excluded).
+            Initialized to the identity (all J features active per dim).
         """
         J = len(f)
         D,self.snapshots = X.shape
@@ -124,125 +123,157 @@ class feature_tensor(TT):
         # initialize TT
         super().__init__(cores, threshold=threshold)
 
-        # index tracking
-        # supp_indices[d] maps shrunk feature index back to original
-        # for d = 0, ..., D-2 (excluding weak/strong core)
-        # initialized to identity, all J features active in each dimension
-        self.supp_indices = [np.arange(J) for _ in range(D)]
-
         # other metadata
         self.verbose = verbose
         self.Mp = M - len(phi) + 1 if phi is not None else M # final mode
         self.feature_norms = norms
+        self.supp_indices = [np.arange(J) for _ in range(D)]
         
     def all_active_features(self):
         """
-        Return list of all active features in each dimension, as lists of
-        indices into original feature list. Use this to recover features
+        Active candidate functions in each dimension, as indices into the
+        original candidate-function list. Use this to recover features
         after TT_STLS.
 
         Returns
         -------
-        active_features : list of np.array
-            active_features[d] is array of indices of active features in dimension d
+        active_features : list of np.ndarray
+            active_features[d] holds the surviving feature indices in
+            dimension d.
         """
         D = self.order - 1
         active_features = [self.supp_indices[d] for d in range(D)]
         return active_features
     
-    def coarse_supp(self, W, lamb):
+    def support_key(self):
         """
-        Compute coarse support of W
+        Hashable key identifying the current support state.
+
+        Returns
+        -------
+        key : tuple of tuple of int
+            Per-dimension tuples of surviving original candidate-function
+            indices. Two feature tensors at the same support share a key,
+            so their weights can be cached and reused across thresholds.
+        """
+        D = self.order - 1
+        return tuple(tuple(int(i) for i in self.supp_indices[d]) for d in range(D))
+
+    def compute_weights(self, W):
+        """
+        Per-mode importance weights for a coefficient tensor.
+
+        These are the quantities thresholded inside coarse_supp. They depend
+        only on the support and the regression target (through W), not on the
+        threshold lamb, so they can be cached per support and reused across
+        the lambda sweep.
 
         Parameters
         ----------
         W : TT
-            Coefficient tensor estimate
-            modes   J_1 x ... x J_D or
-                    D_1 x ... x D_J
-            ranks   (M_1, ..., M_D)
-            W has had the core corresponding to the weak core
-            contracting into the rest of the tensor train
-        lamb : float
-            Thresholding parameter
-        bound : float
-            ||x||_2/||Theta||_2
+            Coefficient tensor estimate, with the weak/strong core already
+            contracted into the train.
 
         Returns
         -------
-        supp : list of np.array
-            supp[d] is boolean array of length J_d, indicating which features
-            are in the support for dimension d
+        weights : list of np.ndarray
+            weights[d] holds the normalized weight of each feature in
+            dimension d (scaled so the largest weight is 1).
         """
         D = self.order - 1
-        supp = [None]*(D)
-        Wcores = W.cores
-        Wmodes = W.row_dims
-        Wranks = W.ranks
-        
+        Wcores, Wmodes, Wranks = W.cores, W.row_dims, W.ranks
+
         # Accumulate right density matrices
-        DRs = [None]*(D-1) #D_R^1, ..., D_R^(D-1), D_R^(D)
-
-        for d in range(D-2,-1,-1):
-
-            DR = np.zeros((Wranks[d+1], Wranks[d+1])) # running sum
+        DRs = [None]*(D-1)
+        for d in range(D-2, -1, -1):
+            DR = np.zeros((Wranks[d+1], Wranks[d+1]))
             for j in range(Wmodes[d+1]):
-
-                Wdj = Wcores[d+1][:,j,:,:].squeeze(axis=1)
-                if d == D-2: DR += Wdj @ Wdj.T
-                else: DR += Wdj @ DRs[d+1] @ Wdj.T
-
+                Wdj = Wcores[d+1][:, j, :, :].squeeze(axis=1)
+                DR += (Wdj @ Wdj.T) if d == D-2 else (Wdj @ DRs[d+1] @ Wdj.T)
             DRs[d] = DR
 
-        # Compute left density matrices and traces in unison
+        weights = [None]*D
         DLm1 = None
         for d in range(D):
-            
-            DL = np.zeros((Wranks[d+1], Wranks[d+1]))
-            weights = np.zeros(Wmodes[d])
 
-            supp[d] = np.zeros(Wmodes[d], dtype=bool)
+            DL = np.zeros((Wranks[d+1], Wranks[d+1]))
+            w = np.zeros(Wmodes[d])
+
             for j in range(Wmodes[d]):
 
-                Wdj = Wcores[d][:,j,:,:].squeeze(axis=1)
-                S = np.zeros((Wranks[d+1],Wranks[d+1]))
-                if DLm1 is None: S += Wdj.T @ Wdj
-                else: S += Wdj.T @ DLm1 @ Wdj
+                Wdj = Wcores[d][:, j, :, :].squeeze(axis=1)
+                S = (Wdj.T @ Wdj) if DLm1 is None else (Wdj.T @ DLm1 @ Wdj)
                 DL += S
-
-                if d == D - 1: 
-                    weights[j] = max(0.0,float(np.sum(S)))
-                else: 
-                    weights[j] = max(0.0, float(np.sum(S * DRs[d])))
-
-            DLm1 = DL
-
-            # Scalar threshold against the band
-            LB = lamb
-            #weights **= 2
-            weights /= weights.max()
-            keep = (weights > LB)
-
-            # Safeguard: never empty a dimension — keep the argmax
-            if not keep.any() and Wmodes[d] > 0:
-                keep[int(np.argmax(weights))] = True
-            supp[d] = keep
-
-            if self.verbose:
-                print(f"  d={d}: weights={weights}, LB={LB:.3e}")
-
-        return supp
+                w[j] = max(0.0, float(np.sum(S))) if d == D-1 \
+                    else max(0.0, float(np.sum(S * DRs[d])))
                 
+            DLm1 = DL
+            w /= w.max()
+            weights[d] = w
 
-    def apply_supp(self, supp):
+        return weights
+
+    def threshold_weights(self, weights, lamb):
         """
-        Given support of W, reduce feature tensor to only those features.
+        Threshold cached weights into a per-dimension support mask.
 
         Parameters
         ----------
-        supp : list of list
-            supp[d] is boolean array of length J_d, indicating which features
-            are in the support for dimension d
+        weights : list of np.ndarray
+            Normalized per-feature weights, as returned by compute_weights.
+        lamb : float
+            Threshold. A feature is kept where its weight exceeds lamb; if a
+            dimension would be emptied, its strongest feature is kept.
+
+        Returns
+        -------
+        supp : list of np.ndarray
+            supp[d] is a boolean mask over the features in dimension d.
+        """
+        supp = [None]*len(weights)
+        for d, w in enumerate(weights):
+            keep = w > lamb
+            if not keep.any() and w.size > 0:
+                keep[int(np.argmax(w))] = True
+            if self.verbose:
+                print(f"  d={d}: weights={w}, LB={lamb:.3e}")
+            supp[d] = keep
+        return supp
+
+    def coarse_supp(self, W, lamb):
+        """
+        Coarse support of W at threshold lamb.
+
+        Convenience wrapper that computes the (lamb-independent) weights and
+        thresholds them in one call. Prefer compute_weights / threshold_weights
+        directly when caching weights across lambda values.
+
+        Parameters
+        ----------
+        W : TT
+            Coefficient tensor estimate.
+        lamb : float
+            Threshold.
+
+        Returns
+        -------
+        supp : list of np.ndarray
+            Per-dimension boolean support masks.
+        """
+        return self.threshold_weights(self.compute_weights(W), lamb)
+                
+    def apply_supp(self, supp):
+        """
+        Reduce the feature tensor to the features in supp.
+
+        Slices the feature axis of each feature core, updates the index map
+        (supp_indices) to keep only surviving features, and updates the
+        corresponding row dimensions. The weak/strong core is left untouched.
+
+        Parameters
+        ----------
+        supp : list of np.ndarray
+            supp[d] is a boolean mask over the features in dimension d.
         """
         D = self.order - 1
         cores_prime = [None]*(D+1)
@@ -264,26 +295,30 @@ class feature_tensor(TT):
 
     def TT_PI(self, x, threshold=0):
         """
-        Find pseudoinverse of feature tensor, regress
-        against x and threshold down ranks, if applicable.
+        TT pseudoinverse regression.
+
+        Form the pseudoinverse of the feature tensor (optionally truncating
+        its constituent SVDs by `threshold`), regress against x, and collapse
+        the result into a coefficient tensor.
 
         Parameters
         ----------
-        x : np.array
-            Data to regress against
+        x : np.ndarray
+            Target values to regress against, length self.Mp.
+        threshold : float
+            SVD truncation parameter. threshold=0 computes the exact
+            pseudoinverse.
 
         Returns
         -------
         W : TT
-            Pseudoinverse of feature tensor
-        smax : float
-            largest singular value of self, which
-            is also the 2-norm of the right-unfolding
+            Coefficient tensor estimate (the weak/strong core has been
+            contracted with x and collapsed into the train).
 
         Raises
         ------
         ValueError
-            if vector x does not have length self.shape[-1]
+            If x does not have length self.Mp.
         """
         if x.shape[0] != self.Mp:
             raise ValueError(
@@ -307,25 +342,40 @@ class feature_tensor(TT):
         # Collapse the final core into rest of tensor
         next_last = W.cores[-2]@last
         W = TT(W.cores[:-2] + [next_last]) # auto update attributes
+
+        #print(f'DEBUG ranks: {W.ranks}')
         return W
 
-    def TT_STLS(self, x, lamb, threshold=0):
+    def TT_STLS(self, x, lamb, threshold=0, weight_cache=None):
         """
-        Tensor-train squential thresholding least squares (TT-STLS)
+        Tensor-train sequential thresholding least squares (TT-STLS).
+
+        Repeatedly estimate the coefficient tensor (TT_PI), threshold it to a
+        coarse support, and reduce the feature tensor, until the support stops
+        shrinking (or collapses to a single feature). The final estimate is
+        recomputed on the converged support and unscaled.
 
         Parameters
         ----------
-        x : np.array
-            Data to regress against
+        x : np.ndarray
+            Target values to regress against.
         lamb : float
-            Thresholding parameter
+            Thresholding parameter.
+        threshold : float
+            SVD truncation parameter passed to TT_PI.
+        weight_cache : dict, optional
+            Maps a support key (see support_key) to its precomputed weights,
+            so the weights for a given support are computed only once across a
+            lambda sweep. A fresh cache is used if none is given.
 
         Returns
         -------
         W : TT
-            Coefficient tensor estimate after TT-STLS
-        TODO
+            Coefficient tensor estimate on the converged support, unscaled by
+            the feature norms.
         """
+        if weight_cache is None:
+            weight_cache = {}
 
         # initialize support
         J = self.row_dims[0] # row dims are (J,...,J,M')
@@ -340,18 +390,21 @@ class feature_tensor(TT):
             print('----------------')
             st = time()
 
-
-        # iteratively apply STLS step until support converges
         i = 1
         while True:
 
             supp_prev = supp
-            
-            # compute coefficient estimate
-            W = self.TT_PI(x, threshold)
 
-            # Compute & apply supp
-            supp = self.coarse_supp(W, lamb)
+            key = self.support_key()
+            weights = weight_cache.get(key)
+
+            if weights is None: 
+                W = self.TT_PI(x, threshold)
+                weights = self.compute_weights(W)
+                weight_cache[key] = weights
+
+            # compute & apply supp
+            supp = self.threshold_weights(weights, lamb)
             self.apply_supp(supp)
 
             if self.verbose:
@@ -359,8 +412,7 @@ class feature_tensor(TT):
                 print(f'Support size: {self.supp_size(supp)}')
                 print('----------------')
 
-            # supp is montonically decreasing. So only need to compare
-            #   to size of previous support
+            # supp is montonically decreasing. So only need to compare to size of previous support
             if self.supp_size(supp) == self.supp_size(supp_prev) or \
                 self.supp_size(supp) == 1:
                 break
@@ -369,7 +421,6 @@ class feature_tensor(TT):
         if self.verbose:
             print(f'Finished TT-STLS in {i} iterations, with final support size {self.supp_size(supp)}')
             print(f'Time elapsed: {time() - st:.2f} seconds')
-            #print(supp)
 
         # Recompute W on converged support and unscale
         W = self.TT_PI(x, threshold)
@@ -379,17 +430,21 @@ class feature_tensor(TT):
     
     def unscale(self, W):
         """
-        Unscale each core slice of W by the norms of the corresponding features.
+        Undo the per-feature normalization of a coefficient estimate.
+
+        Each feature slice was scaled by its norm during construction; this
+        rescales the corresponding coefficient slices back, using the index
+        map to recover the original candidate function for each survivor.
 
         Parameters
         ----------
         W : TT
-            Coefficient tensor estimate, with cores scaled by feature norms
+            Coefficient tensor estimate with normalized feature scaling.
 
         Returns
         -------
-        W_unscaled : TT
-            Coefficient tensor estimate, with cores unscaled by feature norms
+        W : TT
+            The same tensor with the normalization undone.
         """
         for d in range(W.order):
             for j in range(W.row_dims[d]):
@@ -400,6 +455,17 @@ class feature_tensor(TT):
 
     def supp_size(self, supp):
         """
-        Utility function, gives support size
+        Size of the support induced by a mask.
+
+        Parameters
+        ----------
+        supp : list of np.ndarray
+            Per-dimension boolean support masks.
+
+        Returns
+        -------
+        size : int
+            Product over dimensions of the number of active features (each
+            dimension counted as at least 1).
         """
         return np.prod([np.max([s.sum(),1]) for s in supp])
