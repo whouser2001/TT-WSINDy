@@ -94,7 +94,7 @@ def TT_MSTLS(Theta, x, lambs, total_size, verbose=False):
     W0 = Theta.unscale(Theta.TT_PI(x))
     W0Theta_norm = np.linalg.norm(utils.W_contract(W0, Theta))
 
-    min_loss = 1        # Non thresholded loss is 1
+    min_loss = np.inf
     ThetaStar = None
     Wstar = None
     suppStar = None
@@ -105,7 +105,10 @@ def TT_MSTLS(Theta, x, lambs, total_size, verbose=False):
     for i in range(len(lambs)):
 
         lamb = lambs[i]
+
+        #st_debug = time()
         ThetaLa = copy.deepcopy(Theta)
+        #print(f'theta copy time = {time() - st_debug}')
 
         if i == 0: ThetaLa.verbose = verbose
 
@@ -233,7 +236,7 @@ def MSTLS(G, b, lambs, verbose=False):
         wLa, GLa, suppLa = STLS(G, b, lamb, w0)
 
         if wLa is None:
-            loss = 1   # empty supprt
+            loss = np.inf   # empty supprt
         else:
             GwLa = GLa @ wLa
 

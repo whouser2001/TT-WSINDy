@@ -17,20 +17,42 @@ from scipy.signal import correlate
 from scipy.integrate import odeint
 import itertools
 
+def print_supp(fstr, supps, feature_maps):
+
+    D = len(supps)
+    for d1 in range(D):
+
+        supp = supps[d1]
+        feature_map = feature_maps[d1]
+        str = f'x_{d1 + 1}\' : '
+
+        for k in supp:
+            substr = ''
+            for d2 in range(D):
+                substr += fstr[feature_map[k][d2]](d2+1)
+            if substr == '': substr += '1'
+            str += substr
+            if k != supp[-1]: str += '  '
+
+        print(str)
+        #print('-')
+
+
 if __name__ == '__main__':
 
     # Whether to rerun simluation or read from file
     recompute_data = True
+    plot_walltimes = False
 
     F = 8       # Forcing function
-    M = 10000     # num timepoints
+    M = 2000     # num timepoints
 
     def L96(x,t):
         """Lorenz 96 model with constant forcing"""
         return (np.roll(x, -1) - np.roll(x, 2)) * np.roll(x, 1) - x + F
     
     t0 = 0
-    tM = 10
+    tM = 20
     t = np.linspace(t0, tM, M)
 
     f = [
@@ -39,14 +61,16 @@ if __name__ == '__main__':
         lambda x : np.sin(x)
     ]
     J = len(f)
+    fstr = [lambda n : '',
+            lambda n : f'x_{n}']
 
-    numTT = 15
-    numflat = 25
-    TTlambs = 10**((4/(numTT))*np.arange(0,numTT+1) - 4)
-    flatlambs = np.linspace(10**(-10), 10**(-1), numflat)
+    numTT = 25
+    numflat = 100
+    TTlambs = np.linspace(10**(-3), 5*10**(-1), numTT)
+    flatlambs = np.linspace(10**(-11), 10**(-1), numflat)
     threshold = 10**(-16)
 
-    D_min = 5
+    D_min = 8
     D_max = 8   # inclusive
     walltimes = np.zeros((D_max - D_min + 1, 4))
     for D in range(D_min, D_max + 1): # Increase to ~[4,15] once operational
@@ -62,7 +86,8 @@ if __name__ == '__main__':
 
         # TT-WSINDy
         ttwsindy_ret = TT_WSINDy(
-            X, t0, tM, f, TTlambs, flatlambs, verbosity=0, threshold=threshold
+            X, t0, tM, f, TTlambs, flatlambs, verbosity=0, threshold=threshold,
+            low_rank=True
         )
         walltimes[D-D_min][0] = ttwsindy_ret[3]
         walltimes[D-D_min][2] = ttwsindy_ret[4]
@@ -73,6 +98,13 @@ if __name__ == '__main__':
              for d in range(D)]
         )
         print(f'Reduced problem size: {reduced_size}')
+
+        # Print final support
+        supps = ttwsindy_ret[1]
+        feature_maps = ttwsindy_ret[2]
+        print('TT-WSINDy Discovered support:')
+        print_supp(fstr, supps, feature_maps)
+
         print('Beginning flat WSINDy.')
 
         # WSINDy
@@ -86,7 +118,7 @@ if __name__ == '__main__':
         feature_map = list(itertools.product(
             *[np.arange(J) for _ in range(D)]
         ))
-        
+
         Jprime = J**D
         G = np.zeros((Jprime, M))
         for k in range(Jprime):
@@ -94,42 +126,54 @@ if __name__ == '__main__':
             for d in range(D):
                 gk *= basis_data[feature_map[k][d], d, :]
             G[k, :] = gk
-        
+
         phi, dphi = test_function.piecewise_polynomial(
             (tM - t0)/20, 16, t0, tM, M
         )
         phi = np.expand_dims(phi, axis=0)
         dphi = np.expand_dims(dphi, axis=0)
-        Y = correlate(X, dphi, mode='valid').transpose()
+        # first-order weak form LHS: <x_dot, phi> = -<x, phi'> (the -1 was missing)
+        Y = -1 * correlate(X, dphi, mode='valid').transpose()
         G = correlate(G, phi, mode='valid').transpose()
 
         # flat MSTLS
+        supps = []
+        feature_maps = [
+            feature_map for _ in range(D)
+        ]
         for d in range(D):
-            wsindy_ret = MSTLS(
+            mstls_ret = MSTLS(
                 G, Y[:,d], flatlambs, verbose=False
             )
+            supps.append(mstls_ret[1])
+        print('WSINDy discovered support:')
+        print_supp(fstr, supps, feature_maps)
         
         wsindy_end = time()
         walltimes[D-D_min][1] = wsindy_end - wsindy_st
+
+        # dump data as it populates
+        np.savetxt('results/complexityvWSINDy.txt', walltimes)
     
-    # dump or load data
-    if recompute_data: np.savetxt('results/complexityvWSINDy.txt', walltimes)
-    else: walltimes = np.loadtxt('results/complexityvWSINDy.txt')
+    if plot_walltimes:
+        # dump or load data
+        if recompute_data: np.savetxt('results/complexityvWSINDy.txt', walltimes)
+        else: walltimes = np.loadtxt('results/complexityvWSINDy.txt')
 
-    # plot results
-    Ds = range(D_min, D_max + 1)
+        # plot results
+        Ds = range(D_min, D_max + 1)
 
-    plt.plot(Ds, walltimes[:,0], label='TT-WSINDy', marker='o')
-    plt.plot(Ds, walltimes[:,1], label='matrix WSINDy', marker='o')
-    plt.plot(Ds, walltimes[:,2], label='(TTW) TT-MSTLS', marker='o')
-    plt.plot(Ds, walltimes[:,3], label='(TTW) MSTLS', marker='o')
+        plt.plot(Ds, walltimes[:,0], label='TT-WSINDy', marker='o')
+        plt.plot(Ds, walltimes[:,1], label='matrix WSINDy', marker='o')
+        plt.plot(Ds, walltimes[:,2], label='(TTW) TT-MSTLS', marker='o')
+        plt.plot(Ds, walltimes[:,3], label='(TTW) MSTLS', marker='o')
 
-    plt.legend()
-    plt.xlabel('number of dimensions')
-    plt.ylabel('walltime')
-    
-    plt.savefig('results/complexityvWSINDy.png')
-    plt.show()
+        plt.legend()
+        plt.xlabel('number of dimensions')
+        plt.ylabel('walltime')
+        
+        plt.savefig('results/complexityvWSINDy.png')
+        plt.show()
 
 
 

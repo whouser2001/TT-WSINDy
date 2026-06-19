@@ -18,7 +18,8 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
                 testfn=('piecewise_polynomial', 1/20, 16, 1), 
                 loss='default',
                 threshold=0.0,
-                verbosity=0):
+                verbosity=0,
+                low_rank=True):
     """
     TT-WSINDy.
  
@@ -106,7 +107,8 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
     Theta = feature_tensor(X, f, 
                             threshold=threshold,
                             phi=phi,
-                            verbose=debug)
+                            verbose=debug,
+                            low_rank=low_rank)
     
     # compute the weak-form left-hand side
     phi = np.expand_dims(phi, axis=0)
@@ -130,7 +132,8 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
             print('--------')
         
         # coarse pass: TT-MSTLS
-        Theta_d = copy.deepcopy(Theta)
+        if d < D-1: Theta_d = copy.deepcopy(Theta)
+        else: Theta_d = Theta
 
         tt_mstls_st = time()
 
@@ -193,9 +196,6 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
         print(f'Total runtime: {ttwsindy_time}')
         print(f'TT-MSTLS runtime: {tt_mstls_time}')
         print(f'MSTLS runtime: {mstls_time}')
-        for d in range(D):
-            # TODO: print in terms of original features, instead
-            print(f'dim {d} support: {supp[d]}')
         print('------------------')
 
     return W, supp, feature_maps, ttwsindy_time, tt_mstls_time, mstls_time, coarse_supps

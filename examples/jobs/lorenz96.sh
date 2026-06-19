@@ -7,6 +7,7 @@
 #SBATCH --qos=blanca-bortz
 #SBATCH --gres=gpu:1
 #SBATCH --ntasks=32
+#SBATCH --mem=128G
 #SBATCH --output=sample-%j.out
 
 module load anaconda

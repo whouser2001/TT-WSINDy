@@ -16,9 +16,9 @@ from scipy.signal import correlate
 from scipy.integrate import odeint
 
 if __name__ == '__main__':
-    D = 5       # Dimension of system
+    D = 7       # Dimension of system
     F = 8       # Forcing
-    M = 5000     # num timepoints
+    M = 2500     # num timepoints
 
     def L96(x, t):
         """Lorenz 96 model with constant forcing"""
@@ -32,29 +32,30 @@ if __name__ == '__main__':
     X = odeint(L96, x0, t).T
     f = [
         lambda x : 1,
-        lambda x : x,
-        lambda x : np.sin(x)        # superfluous basis feature
+        lambda x : x
+        #lambda x : np.sin(x)        # superfluous basis feature
     ]
     J = len(f)
 
     # Lambdas range
-    denom = 20
+    denom = 10
     TTlambs = 10**(
        (8/(denom))*np.arange(0,denom+1) - 8
     )
+    #TTlambs = np.linspace(0.05, 0.1, 10)
     #TTlambs = np.linspace(0.1, 1, 50)
-    num = 25
+    num = 10
     flatlambs = np.linspace(
         10**(-11), 2.5*10**(-6), num
     )
 
-    eps = 10**(-22)
+    eps = 10**(-16)
     results = TT_WSINDy(X, 0, tn, f, TTlambs, flatlambs, verbosity=2,
               threshold=eps)
     
     supps = results[1]
     feature_maps = results[2]
-    print(results[-1])  #coarse supps
+    #print(results[-1])  #coarse supps
     # print(supp)
     # print(feature_maps)
 

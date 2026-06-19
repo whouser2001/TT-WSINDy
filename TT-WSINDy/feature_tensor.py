@@ -48,7 +48,7 @@ class feature_tensor(TT):
         Size of the support induced by a mask.
     """
 
-    def __init__(self, X, f, threshold=0, phi=None, verbose=False):
+    def __init__(self, X, f, threshold=0, phi=None, verbose=False, low_rank=True):
         """
         Parameters
         ----------
@@ -61,6 +61,16 @@ class feature_tensor(TT):
             vector. None selects the strong form.
         verbose : bool
             If True, print progress/debugging information.
+        low_rank : bool
+            Construction method. The naive construction stores diagonal cores
+            of shape (M, J, 1, M), i.e. O(D J M^2) memory, which is infeasible
+            for large M. With low_rank=True (default) the same feature tensor is
+            built directly in compressed form by a left-to-right SVD sweep over
+            a small "carry" matrix: the internal bonds collapse to the true
+            ranks (<= J^min(d, D-d)) and only the final (time) core scales with
+            M, giving O(J^D + r M) memory -- linear in M. The two paths are
+            numerically equivalent (to the SVD threshold). Set low_rank=False to
+            force the original dense construction.
 
         Attributes (beyond those provided by TT)
         ----------
@@ -85,43 +95,64 @@ class feature_tensor(TT):
 
         M = self.snapshots
 
-        # initialize blank cores
-        cores = [np.zeros([1, J, 1, M])] + [np.zeros([M, J, 1, M]) for _ in range(D-1)]
-
-        # norm tracking
-        norms = np.zeros((J,D))
-
-        # fill in cores with candidate functions
+        # normalized basis evaluations B[j, d, :] = f_j(X[d, :]) / ||.||,
+        # and the per-(feature, dim) norms (shared by both constructions)
+        norms = np.zeros((J, D))
+        B = np.zeros((J, D, M))
         for j in range(J):
-
-            # evaluate dataset on fj
-            fX = np.vectorize(f[j])(X)
-            fX = fX.astype(float)
-
-            # Perform per-dim normalization and store norms for later
+            fX = np.vectorize(f[j])(X).astype(float)        # (D, M)
             for d in range(D):
-                nrm = np.linalg.norm(fX[d,:])
-                norms[j,d] = nrm if nrm > 0 else 1.0
-                fX[d,:] /= norms[j,d]
+                nrm = np.linalg.norm(fX[d, :])
+                norms[j, d] = nrm if nrm > 0 else 1.0
+            B[j] = fX / norms[j][:, None]
 
-            # fill in slice of first core
-            cores[0][0, j, 0, :] = fX[0, :]
+        if low_rank:
+            # Build the feature tensor directly in compressed TT form. The naive
+            # tensor is  Theta[j_0..j_{D-1}, m] = prod_d B[j_d, d, m]  with the
+            # time index m carried on every bond (rank M). Here we carry a
+            # compressed state C (shape r x M) and, at each mode, expand by the
+            # next factor and re-compress with an SVD, so the bonds shrink to the
+            # true ranks. Only the final (time) core scales with M.
+            cores = []
+            C = np.ones((1, M))                              # carry: (r, M)
+            for d in range(D):
+                r = C.shape[0]
+                # E[(a,j), m] = C[a, m] * B[j, d, m]
+                E = (C[:, None, :] * B[:, d, :][None, :, :]).reshape(r * J, M)
+                U, s, Vt = np.linalg.svd(E, full_matrices=False)
+                s0 = s[0] if s.size and s[0] > 0 else 1.0
+                tol = (threshold if threshold > 0 else 1e-13) * s0
+                k = max(int(np.sum(s > tol)), 1)
+                cores.append(U[:, :k].reshape(r, J, 1, k))
+                C = s[:k, None] * Vt[:k, :]                  # new carry: (k, M)
 
-            # fill in other cores
-            for d in range(1,D):
-                for m in range(M):
-                    cores[d][m, j, 0, m] = fX[d,m]
+            # final (time) core: strong form keeps every snapshot; the weak form
+            # convolves the carry with phi (this is the only M-sized object)
+            if phi is None:
+                cores.append(C.reshape(C.shape[0], M, 1, 1))
+            else:
+                Cw = correlate(C, np.expand_dims(phi, axis=0), mode='valid')
+                cores.append(Cw.reshape(C.shape[0], Cw.shape[1], 1, 1))
 
-        # append strong or weak core
-        if phi is None: cores.append(np.eye(M).reshape(M,M,1,1))
-        else: 
-            Iphi = correlate(
-                np.eye(M), np.expand_dims(phi, axis=0), mode='valid'
-            )
-            cores.append(Iphi.reshape(M,Iphi.shape[1],1,1))
+            # cores are already compressed; avoid a second global rounding
+            super().__init__(cores, threshold=0)
 
-        # initialize TT
-        super().__init__(cores, threshold=threshold)
+        else:
+            # original dense construction: O(D J M^2) memory (diagonal cores)
+            cores = [np.zeros([1, J, 1, M])] + \
+                    [np.zeros([M, J, 1, M]) for _ in range(D - 1)]
+            for j in range(J):
+                cores[0][0, j, 0, :] = B[j, 0, :]
+                for d in range(1, D):
+                    for m in range(M):
+                        cores[d][m, j, 0, m] = B[j, d, m]
+            if phi is None:
+                cores.append(np.eye(M).reshape(M, M, 1, 1))
+            else:
+                Iphi = correlate(np.eye(M), np.expand_dims(phi, axis=0),
+                                 mode='valid')
+                cores.append(Iphi.reshape(M, Iphi.shape[1], 1, 1))
+            super().__init__(cores, threshold=threshold)
 
         # other metadata
         self.verbose = verbose
@@ -449,7 +480,7 @@ class feature_tensor(TT):
         for d in range(W.order):
             for j in range(W.row_dims[d]):
                 orig_j = self.supp_indices[d][j]
-                W.cores[d][:,j,:,:] *= self.feature_norms[orig_j,d]
+                W.cores[d][:,j,:,:] /= self.feature_norms[orig_j,d]
 
         return W
 
