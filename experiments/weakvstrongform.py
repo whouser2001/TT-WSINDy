@@ -310,7 +310,7 @@ if __name__ == "__main__":
     degree = 16         # test-function polynomial degree
     threshold = 1e-10   # TT-PI singular-value truncation (regularized pinv)
 
-    noise_levels = np.array([0.0, 1e-5, 1e-4, 3e-4, 1e-3, 1e-2])
+    noise_levels = np.array([1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 3e-4, 1e-3, 1e-2, 1e-1])
     n_trials = 3        # noise realizations averaged per level
 
     f = [lambda x: 1, lambda x: x, lambda x: x ** 2, lambda x: x ** 3]
@@ -399,7 +399,7 @@ if __name__ == "__main__":
                  label='MANDy (strong form, finite diff.)')
     plt.xscale('log')
     plt.yscale('log')
-    plt.xlabel(r'relative noise level $\sigma$  (leftmost point = clean data)')
+    plt.xlabel(r'relative noise level $\sigma$')
     plt.ylabel('relative coefficient error')
     plt.title(f'Weak vs. strong form TT-PI on FPUT (D={D}, M={M})')
     plt.legend()

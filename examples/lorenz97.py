@@ -50,7 +50,7 @@ from scipy.integrate import odeint
 
 # Use the vendored PyWLaSDI wsindy package (../PyWLaSDI), resolved relative to
 # this file so the script runs from any working directory.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "PyWLaSDI"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "WSINDy"))
 from wsindy import wsindy  # noqa: E402
 
 

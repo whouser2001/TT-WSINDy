@@ -91,7 +91,7 @@ class feature_tensor(TT):
             Initialized to the identity (all J features active per dim).
         """
         J = len(f)
-        D,self.snapshots = X.shape
+        D,self.snapshots = X.shape if X.ndim > 1 else (1,X.size)
 
         M = self.snapshots
 
@@ -102,7 +102,7 @@ class feature_tensor(TT):
         for j in range(J):
             fX = np.vectorize(f[j])(X).astype(float)        # (D, M)
             for d in range(D):
-                nrm = np.linalg.norm(fX[d, :])
+                nrm = np.linalg.norm(fX[d, :]) if D > 1 else np.linalg.norm(fX)
                 norms[j, d] = nrm if nrm > 0 else 1.0
             B[j] = fX / norms[j][:, None]
 
@@ -113,6 +113,9 @@ class feature_tensor(TT):
             # compressed state C (shape r x M) and, at each mode, expand by the
             # next factor and re-compress with an SVD, so the bonds shrink to the
             # true ranks. Only the final (time) core scales with M.
+            #
+            # True ranks are bounded by J^D, so use this when J^D >= M to save
+            # time & memory
             cores = []
             C = np.ones((1, M))                              # carry: (r, M)
             for d in range(D):
@@ -136,7 +139,6 @@ class feature_tensor(TT):
 
             # cores are already compressed; avoid a second global rounding
             super().__init__(cores, threshold=0)
-
         else:
             # original dense construction: O(D J M^2) memory (diagonal cores)
             cores = [np.zeros([1, J, 1, M])] + \

@@ -19,7 +19,7 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
                 loss='default',
                 threshold=0.0,
                 verbosity=0,
-                low_rank=True):
+                low_rank=False):
     """
     TT-WSINDy.
  
@@ -83,8 +83,8 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
     coarse_supps : list of list of np.ndarray
         Per-dimension coarse supports from TT-MSTLS.
     """
-    D = X.shape[0]
-    M = X.shape[1]
+    if X.ndim == 1: D,M = (1,X.size)
+    else: D,M = X.shape
     J = len(f)
     problemSize = J**D
 
@@ -112,7 +112,7 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
     
     # compute the weak-form left-hand side
     phi = np.expand_dims(phi, axis=0)
-    dphi = np.expand_dims(dphi,axis=0)
+    if D > 1: dphi = np.expand_dims(dphi,axis=0)
     Y = -1*correlate(X, dphi, mode='valid').transpose()    # (Mp, D)
 
     # store per-dimension results
@@ -125,11 +125,6 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
     tt_mstls_time = 0
     mstls_time = 0
     for d in range(D):
-
-        if verbose:
-            print('--------')
-            print('dim = {}'.format(d))
-            print('--------')
         
         # coarse pass: TT-MSTLS
         if d < D-1: Theta_d = copy.deepcopy(Theta)
@@ -137,18 +132,17 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
 
         tt_mstls_st = time()
 
-        y_d = Y[:,d]
+        y_d = Y[:,d] if D > 1 else Y
         Theta_star, wStar, suppStar = sparsification.TT_MSTLS(
             Theta_d, y_d, TTlambs, problemSize, verbose=debug
         )
         
         tt_mstls_end = time()
         if verbose:
-            print('--------')
+            print('------------------')
             print(f'TT-MSTLS concluded for d = {d}')
             print(f'coarse support: {suppStar}')
             print('Beginning flat MSTLS')
-            print('--------')
 
         coarse_supp = Theta_star.all_active_features()
         coarse_supps.append(coarse_supp)
@@ -157,6 +151,9 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
             np.concatenate(coarse_supp)
         )
         Jtilde = len(feature_map)
+
+        # inverse index map
+        inx = {basis[i]:i for i in range(len(basis))}
 
         # reconstruct WSINDy matrix G from surviving features
         basis_data = np.zeros((basis.size, D, M))
@@ -167,8 +164,10 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
         G = np.zeros((Jtilde, M))           # prod(Jd) x M
         for k in range(Jtilde):
             gk = np.ones(M)
-            for dee in range(D):
-                gk *= basis_data[feature_map[k][dee], dee, :]
+            if D > 1:
+                for dee in range(D):
+                    gk *= basis_data[inx[feature_map[k][dee]], dee, :]
+            else: gk = basis_data[inx[feature_map[k][0]], :, :]
             G[k, :] = gk
 
         G = correlate(G, phi, mode='valid').transpose()
@@ -177,7 +176,7 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
 
         # fine pass: MSTLS
         wStar, suppStar = sparsification.MSTLS(
-            G, y_d, flatlambs, verbose=0
+            G, y_d, flatlambs, verbose=debug
         )
 
         mstls_end = time()

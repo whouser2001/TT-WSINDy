@@ -44,7 +44,7 @@ def generate_data(
     t = np.linspace(t_start, t_end, n_samples)
     exp_term = np.exp(w1 * (t - t_start))
     u = (w1 * u0 * exp_term) / (w1 + w2 * u0 * (exp_term - 1))
-    return u
+    return t, u
 
 if __name__ == '__main__':
     D = 1

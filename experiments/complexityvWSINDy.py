@@ -7,11 +7,13 @@ TODO. Implement caching to TT-WSINDy to speed this up
 import os,sys
 sys.path.insert(0, '.')
 sys.path.insert(0, '../TT-WSINDy')
+sys.path.insert(0, '../WSINDy')
 import numpy as np
 import matplotlib.pyplot as plt
 from time import time
 from sparsification import MSTLS
 from ttwsindy import TT_WSINDy
+from wsindy import wsindy
 import test_function
 from scipy.signal import correlate
 from scipy.integrate import odeint
@@ -44,30 +46,31 @@ if __name__ == '__main__':
     recompute_data = True
     plot_walltimes = False
 
-    F = 8       # Forcing function
-    M = 2000     # num timepoints
+    F = 8         # Forcing function
+    M = 1000     # num timepoints
 
     def L96(x,t):
         """Lorenz 96 model with constant forcing"""
         return (np.roll(x, -1) - np.roll(x, 2)) * np.roll(x, 1) - x + F
     
     t0 = 0
-    tM = 20
+    tM = 30
     t = np.linspace(t0, tM, M)
 
     f = [
         lambda x : 1,
-        lambda x : x,
-        lambda x : np.sin(x)
+        lambda x : x
     ]
     J = len(f)
     fstr = [lambda n : '',
             lambda n : f'x_{n}']
 
-    numTT = 25
-    numflat = 100
-    TTlambs = np.linspace(10**(-3), 5*10**(-1), numTT)
-    flatlambs = np.linspace(10**(-11), 10**(-1), numflat)
+    #numTT = 10
+    #numflat = 10
+    #TTlambs = np.linspace(10**(-3), 5*10**(-1), numTT)
+    #flatlambs = np.linspace(10**(-11), 10**(-1), numflat)
+    TTlambs = [10**(-2)]
+    flatlambs = [10**(-2)]
     threshold = 10**(-16)
 
     D_min = 8
@@ -86,8 +89,8 @@ if __name__ == '__main__':
 
         # TT-WSINDy
         ttwsindy_ret = TT_WSINDy(
-            X, t0, tM, f, TTlambs, flatlambs, verbosity=0, threshold=threshold,
-            low_rank=True
+            X, t0, tM, f, TTlambs, flatlambs, verbosity=2, threshold=threshold,
+            low_rank=False
         )
         walltimes[D-D_min][0] = ttwsindy_ret[3]
         walltimes[D-D_min][2] = ttwsindy_ret[4]
