@@ -18,7 +18,7 @@ def C2_pp(r,p):
         s += binom(2*p, k)*(-1)**k/(2*k+1)
     return np.pow(r,2*p)*np.sqrt(2*r*s)
 
-def piecewise_polynomial(r, p, t0, tn, M):
+def piecewise_polynomial(r, p, t0, tn, M, order=1):
     """
     Generate and discretize a piecewise polynomial
     test function, given the sampling of the
@@ -34,6 +34,8 @@ def piecewise_polynomial(r, p, t0, tn, M):
         Start and end timepoints
     M : int
         number of time snapshots
+    order : int
+        number of derivatives to take to compute dphi
 
     Returns
     -------
@@ -48,7 +50,11 @@ def piecewise_polynomial(r, p, t0, tn, M):
             )
     C = C2_pp(r,p)
     def phi(t) : return (1/C)*ph(t,r,p)
-    def dphi(t): return (-2*t*p/C)*ph(t,r,p-1)
+    if order == 1:
+        def dphi(t): return (-2*t*p/C)*ph(t,r,p-1)
+    elif order == 2:
+        # Flip sign to account for second IBP application
+        def dphi(t): return (-1/C)*(-2*p*ph(t,r,p-1) + p*(p-1)*4*t**2*ph(t,r,p-2))
 
     dt = (tn - t0)/M
     cl = int(np.ceil(r/dt))
