@@ -19,7 +19,8 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
                 loss='default',
                 threshold=0.0,
                 verbosity=0,
-                low_rank=False):
+                low_rank=False,
+                one_pass=False):
     """
     TT-WSINDy.
  
@@ -64,6 +65,13 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
                 information (verbose)
             2 : additionally print weights, support, and loss at every
                 tested lambda (debug)
+    low_rank : bool
+        If true, builds feature tensor directly in compressed
+        form by a left-to-right SVD sweep over a small "carry" matrix.
+        Best when M >> J^D
+    one_pass : bool
+        If true, performs TT-STLS non-iteratively; only performing
+        a single regression/sparsification step.
  
     Returns
     -------
@@ -121,11 +129,16 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
     feature_maps = []
     coarse_supps = []
 
+    # the one_pass coarse pass solves the SAME feature tensor against each of
+    # the D targets, so the pseudoinverse SVD (the dominant cost) is computed
+    # once here and reused across dimensions
+    pi_factors = Theta.TT_PI_factors() if one_pass else None
+
     # TODO add functionality to run these loops in parallel
     tt_mstls_time = 0
     mstls_time = 0
     for d in range(D):
-        
+
         # coarse pass: TT-MSTLS
         if d < D-1: Theta_d = copy.deepcopy(Theta)
         else: Theta_d = Theta
@@ -134,7 +147,8 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
 
         y_d = Y[:,d] if D > 1 else Y
         Theta_star, wStar, suppStar = sparsification.TT_MSTLS(
-            Theta_d, y_d, TTlambs, problemSize, verbose=debug
+            Theta_d, y_d, TTlambs, problemSize, verbose=debug,
+            one_pass=one_pass, pi_factors=pi_factors
         )
         
         tt_mstls_end = time()

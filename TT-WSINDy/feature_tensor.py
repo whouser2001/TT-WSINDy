@@ -6,6 +6,49 @@ from time import time
 from scikit_tt.tensor_train import TT
 from scipy.signal import correlate
 
+
+def _truncated_svd(A, threshold, small=700, n_oversamples=12, n_iter=2):
+    """
+    Thin SVD keeping the singular triplets with s > tol (= rel*s[0]), where
+    rel = threshold (or 1e-13 if threshold==0).
+
+    For a tall/wide matrix whose effective rank is far below min(A.shape) -- as
+    happens at the weak feature tensor's time-core bond, where convolving with
+    the test function collapses the rank -- a full SVD wastes almost all its
+    work. This uses a randomized range finder (Halko-Martinsson-Tropp) with an
+    adaptive target rank: the rank is doubled until the smallest computed
+    singular value drops below tol (so the entire significant subspace is
+    captured), with a full-SVD fallback for small matrices or genuinely
+    high-rank inputs. Returns U (orthonormal columns), s, Vt truncated to the
+    kept rank.
+    """
+    m, n = A.shape
+    p = min(m, n)
+    rel = threshold if threshold > 0 else 1e-13
+
+    if p <= small:                                    # full SVD already cheap
+        U, s, Vt = np.linalg.svd(A, full_matrices=False)
+    else:
+        rng = np.random.default_rng(0)
+        target = 256
+        while True:
+            ell = min(target + n_oversamples, p)
+            Q, _ = np.linalg.qr(A @ rng.standard_normal((n, ell)))
+            for _ in range(n_iter):                   # power iters (sharpen gap)
+                Q, _ = np.linalg.qr(A @ (A.T @ Q))
+            B = Q.T @ A                               # (ell, n), small
+            Ub, s, Vt = np.linalg.svd(B, full_matrices=False)
+            U = Q @ Ub
+            s0 = s[0] if s.size and s[0] > 0 else 1.0
+            if ell >= p or s[-1] <= rel * s0:         # captured all significant
+                break
+            target = min(target * 2, p)               # else widen and retry
+
+    s0 = s[0] if s.size and s[0] > 0 else 1.0
+    k = max(int(np.sum(s > rel * s0)), 1)
+    return U[:, :k], s[:k], Vt[:k]
+
+
 class feature_tensor(TT):
     """
     Build a tensor train of feature cores from data and a list of
@@ -122,22 +165,35 @@ class feature_tensor(TT):
                 r = C.shape[0]
                 # E[(a,j), m] = C[a, m] * B[j, d, m]
                 E = (C[:, None, :] * B[:, d, :][None, :, :]).reshape(r * J, M)
-                U, s, Vt = np.linalg.svd(E, full_matrices=False)
-                s0 = s[0] if s.size and s[0] > 0 else 1.0
-                tol = (threshold if threshold > 0 else 1e-13) * s0
-                k = max(int(np.sum(s > tol)), 1)
-                cores.append(U[:, :k].reshape(r, J, 1, k))
-                C = s[:k, None] * Vt[:k, :]                  # new carry: (k, M)
+                if d < D - 1:
+                    # interior mode: the bond rank is the exact algebraic rank
+                    # J^(d+1) (no truncation possible), so a full SVD is fine.
+                    U, s, Vt = np.linalg.svd(E, full_matrices=False)
+                    s0 = s[0] if s.size and s[0] > 0 else 1.0
+                    tol = (threshold if threshold > 0 else 1e-13) * s0
+                    k = max(int(np.sum(s > tol)), 1)
+                    cores.append(U[:, :k].reshape(r, J, 1, k))
+                    C = s[:k, None] * Vt[:k, :]              # new carry: (k, M)
+                else:
+                    # last mode: convolve with the test function FIRST (weak
+                    # form). Convolution projects onto the smooth test-function
+                    # subspace, which sharply drops the rank (e.g. 3104 -> ~390
+                    # for L96 J=5,D=5), so a single TRUNCATED SVD of the
+                    # convolved matrix yields both the last feature core and the
+                    # time core. The naive path instead took a full-rank SVD of
+                    # E here and a second SVD to truncate the time bond -- two
+                    # ~O(J^D * M) dense SVDs; this fuses + truncates them into
+                    # one cheap solve (the dominant construction cost). It also
+                    # truncates the time-core bond to the effective rank, which
+                    # the naive path left loose (near-null directions there get
+                    # amplified by 1/sigma in the TT_PI pseudoinverse).
+                    Ec = E if phi is None else correlate(
+                        E, np.expand_dims(phi, axis=0), mode='valid')   # (rJ, Mp)
+                    U, s, Vt = _truncated_svd(Ec, threshold)
+                    cores.append(U.reshape(r, J, 1, U.shape[1]))        # feature core
+                    cores.append((s[:, None] * Vt).reshape(            # time core
+                        U.shape[1], Ec.shape[1], 1, 1))
 
-            # final (time) core: strong form keeps every snapshot; the weak form
-            # convolves the carry with phi (this is the only M-sized object)
-            if phi is None:
-                cores.append(C.reshape(C.shape[0], M, 1, 1))
-            else:
-                Cw = correlate(C, np.expand_dims(phi, axis=0), mode='valid')
-                cores.append(Cw.reshape(C.shape[0], Cw.shape[1], 1, 1))
-
-            # cores are already compressed; avoid a second global rounding
             super().__init__(cores, threshold=0)
         else:
             # original dense construction: O(D J M^2) memory (diagonal cores)
@@ -161,6 +217,7 @@ class feature_tensor(TT):
         self.Mp = M - len(phi) + 1 if phi is not None else M # final mode
         self.feature_norms = norms
         self.supp_indices = [np.arange(J) for _ in range(D)]
+        self.threshold = threshold
         
     def all_active_features(self):
         """
@@ -326,7 +383,26 @@ class feature_tensor(TT):
         self.cores = cores_prime
 
 
-    def TT_PI(self, x, threshold=0):
+    def TT_PI_factors(self):
+        """
+        SVD factors of the feature-tensor pseudoinverse.
+
+        These (U, Sigma, V) depend only on the feature tensor, not on the
+        regression target, so they can be computed once and reused across the
+        D per-dimension targets (the SVD is the cost of TT_PI). Pass the result
+        to TT_PI(x, factors=...).
+
+        Returns
+        -------
+        factors : tuple (TT, np.ndarray, TT)
+            Left factor, singular values, right factor at the split before the
+            weak/strong core.
+        """
+        D = self.order - 1
+        return self.svd(D, threshold=self.threshold,
+                        ortho_l=True, ortho_r=True, overwrite=False)
+
+    def TT_PI(self, x, factors=None):
         """
         TT pseudoinverse regression.
 
@@ -338,9 +414,11 @@ class feature_tensor(TT):
         ----------
         x : np.ndarray
             Target values to regress against, length self.Mp.
-        threshold : float
-            SVD truncation parameter. threshold=0 computes the exact
-            pseudoinverse.
+        factors : tuple (TT, np.ndarray, TT), optional
+            Precomputed pseudoinverse SVD factors from TT_PI_factors(). When
+            given, the (target-independent) global SVD is skipped and reused.
+            The factor cores are copied here so the returned W can be mutated
+            (e.g. unscale) without corrupting the shared factors.
 
         Returns
         -------
@@ -360,11 +438,14 @@ class feature_tensor(TT):
 
         D = self.order - 1
 
-        # self.pinv
-        U, Sigma, V = self.svd(D, threshold=threshold,
-                       ortho_l=True, ortho_r=True, overwrite=False)
-        s = Sigma[0]
-        Wcores = U.cores + V.cores
+        if factors is None:
+            U, Sigma, V = self.svd(D, threshold=self.threshold,
+                           ortho_l=True, ortho_r=True, overwrite=False)
+            Wcores = U.cores + V.cores
+        else:
+            U, Sigma, V = factors
+            # copy: W's cores are mutated downstream (unscale), the factors are shared
+            Wcores = [c.copy() for c in U.cores] + [c.copy() for c in V.cores]
         Wcores[D] = np.tensordot(np.diag(np.reciprocal(Sigma)),
                                  Wcores[D], axes=(1,0))
         W = TT(Wcores)
@@ -374,12 +455,11 @@ class feature_tensor(TT):
 
         # Collapse the final core into rest of tensor
         next_last = W.cores[-2]@last
-        W = TT(W.cores[:-2] + [next_last]) # auto update attributes
+        W = TT(W.cores[:-2] + [next_last])
 
-        #print(f'DEBUG ranks: {W.ranks}')
         return W
 
-    def TT_STLS(self, x, lamb, threshold=0, weight_cache=None):
+    def TT_STLS(self, x, lamb, weight_cache=None):
         """
         Tensor-train sequential thresholding least squares (TT-STLS).
 
@@ -432,7 +512,7 @@ class feature_tensor(TT):
             weights = weight_cache.get(key)
 
             if weights is None: 
-                W = self.TT_PI(x, threshold)
+                W = self.TT_PI(x)
                 weights = self.compute_weights(W)
                 weight_cache[key] = weights
 
@@ -456,7 +536,7 @@ class feature_tensor(TT):
             print(f'Time elapsed: {time() - st:.2f} seconds')
 
         # Recompute W on converged support and unscale
-        W = self.TT_PI(x, threshold)
+        W = self.TT_PI(x)
         W = self.unscale(W)
 
         return W

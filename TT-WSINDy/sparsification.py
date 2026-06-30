@@ -10,25 +10,26 @@ import ttutils as utils
 from time import time
 
 
-def tensor_loss(W, W0, Theta, supp_ratio, W0Theta_norm):
+def tensor_loss(W, W0prod, Theta, supp_ratio, W0Theta_norm):
     """
     MSTLS loss for a tensor-train coefficient estimate.
 
-    Penalizes the change in fit relative to the non-thresholded estimate W0,
+    Penalizes the change in fit relative to the non-thresholded estimate,
     while rewarding a smaller support.
 
     Parameters
     ----------
     W : TT
         Current coefficient estimate, embedded to full size [J]^D.
-    W0 : TT
-        Non-thresholded coefficient estimate, full size [J]^D.
+    W0prod : np.ndarray
+        Non-thresholded estimate contracted with Theta, W_contract(W0, Theta).
+        Precomputed once (it is fixed across the lambda sweep) and passed in.
     Theta : TT
         Feature tensor being regressed against, [J]^D x Mp.
     supp_ratio : float
         Support size as a fraction of the J^D candidate features.
     W0Theta_norm : float
-        Precomputed norm of W0 contracted with Theta.
+        Precomputed norm of W0prod.
 
     Returns
     -------
@@ -36,29 +37,16 @@ def tensor_loss(W, W0, Theta, supp_ratio, W0Theta_norm):
         Relative fit difference plus supp_ratio.
     diff_norm : float
         The relative fit-difference term on its own.
-
-    Raises
-    ------
-    ValueError
-        If W and W0 have different shapes.
     """
-
-    # Check shape
-    if W.row_dims != W0.row_dims:
-        raise ValueError(
-            f'Input to loss function has shape {W.row_dims}, but \
-                non-thresholded coefficient tensor has shape {W0.row_dims}'
-        )
-
     # W contracted with Theta, minus W0 contracted with Theta.
     # Note: W - W0 is NOT elementwise subtraction on a TT, so
     # (W - W0) x Theta would not give the intended difference.
     Wprod = utils.W_contract(W, Theta)
-    W0prod = utils.W_contract(W0, Theta)
     s1 = np.linalg.norm(Wprod - W0prod)/W0Theta_norm
     return s1 + supp_ratio, s1
 
-def TT_MSTLS(Theta, x, lambs, total_size, verbose=False):
+def TT_MSTLS(Theta, x, lambs, total_size, verbose=False, one_pass=False,
+             pi_factors=None):
     """
     Tensor-train MSTLS (TT-MSTLS).
 
@@ -78,6 +66,14 @@ def TT_MSTLS(Theta, x, lambs, total_size, verbose=False):
         Total number of candidate features (J^D).
     verbose : bool
         If True, print per-threshold diagnostics.
+    one_pass : bool
+        If True, only performs a single regression/sparsification step.
+    pi_factors : tuple, optional
+        Precomputed pseudoinverse SVD factors (from Theta.TT_PI_factors()) for
+        the one_pass solve. The factors depend only on Theta, not x, so when
+        TT-WSINDy regresses the same feature tensor against each of the D
+        targets they can be computed once and shared, skipping the (dominant)
+        global SVD on every dimension. Ignored by the iterative path.
 
     Returns
     -------
@@ -90,9 +86,15 @@ def TT_MSTLS(Theta, x, lambs, total_size, verbose=False):
         Surviving candidate-function indices per dimension.
     """
 
-   # initial, non-thresholded estimate and its fit norm (for the loss)
-    W0 = Theta.unscale(Theta.TT_PI(x))
-    W0Theta_norm = np.linalg.norm(utils.W_contract(W0, Theta))
+    # single non-thresholded solve: weights (from the SCALED estimate, as in
+    # TT_STLS) and the unscaled reference W0 used by the loss. One TT_PI total.
+    W_scaled = Theta.TT_PI(x, factors=pi_factors) if one_pass else Theta.TT_PI(x)
+    if one_pass:
+        weights = Theta.compute_weights(W_scaled)
+    W0 = Theta.unscale(W_scaled)        # unscale in place -> reference estimate
+    # W0prod is fixed across the lambda sweep -> compute once, reuse in the loss
+    W0prod = utils.W_contract(W0, Theta)
+    W0Theta_norm = np.linalg.norm(W0prod)
 
     min_loss = np.inf
     ThetaStar = None
@@ -101,26 +103,60 @@ def TT_MSTLS(Theta, x, lambs, total_size, verbose=False):
 
     Theta.verbose = False
 
+    if one_pass:
+        # ---- single-solve coarse selection ----
+        # Sweep lambda, thresholding the cached weights into a candidate product
+        # support and scoring it by masking W0 to that support (no re-solve).
+        # Keep the lowest-loss support and reduce Theta to it once, so the fine
+        # pass sees the reduction.
+        best_mask = None
+        for i, lamb in enumerate(lambs):
+
+            supp_mask = Theta.threshold_weights(weights, lamb)   # boolean masks
+            WLa = utils.mask_coeffs(W0, supp_mask)               # zero out-of-supp
+
+            supp_size = int(np.prod([int(s.sum()) for s in supp_mask]))
+            supp_ratio = supp_size/total_size
+            loss, diff_norm = tensor_loss(WLa, W0prod, Theta, supp_ratio, W0Theta_norm)
+
+            if loss <= min_loss:
+                min_loss = loss
+                best_mask = supp_mask
+                Wstar = WLa
+
+            if verbose:
+                print('-----------')
+                print(f'iteration {i}')
+                print(f'supp size = {supp_size}')
+                print(f'supp ratio = {supp_ratio}')
+                print(f'diff norm = {diff_norm}')
+                print(f'lambda = {lamb}, loss = {loss}')
+                print(f'min_loss = {min_loss}')
+
+        # reduce Theta to the winning support so the fine pass sees it
+        Theta.apply_supp(best_mask)
+        suppStar = Theta.all_active_features()
+        return Theta, Wstar, suppStar
+
+    # ---- iterative TT-STLS coarse selection ----
     weight_cache = {}
     for i in range(len(lambs)):
 
         lamb = lambs[i]
 
-        #st_debug = time()
         ThetaLa = copy.deepcopy(Theta)
-        #print(f'theta copy time = {time() - st_debug}')
-
         if i == 0: ThetaLa.verbose = verbose
 
         # TT-STLS: coefficient estimate and surviving support
         WLa = ThetaLa.TT_STLS(x, lamb, weight_cache=weight_cache)
         suppLa = ThetaLa.all_active_features()
 
-        # embed W back to full size [J]^D for the loss 
+        # embed W back to full size [J]^D for the loss
         WLa = utils.embed_full(WLa, suppLa, W0.row_dims)
+
         suppLa_size = np.prod([s.size for s in suppLa])
         suppLa_ratio = suppLa_size/total_size
-        loss, diff_norm = tensor_loss(WLa, W0, Theta, suppLa_ratio, W0Theta_norm)
+        loss, diff_norm = tensor_loss(WLa, W0prod, Theta, suppLa_ratio, W0Theta_norm)
 
         if loss <= min_loss:
             min_loss = loss
@@ -137,7 +173,6 @@ def TT_MSTLS(Theta, x, lambs, total_size, verbose=False):
             print(f'diff norm = {diff_norm}')
             print(f'lambda = {lamb}, loss = {loss}')
             print(f'min_loss = {min_loss}')
-        
 
     return ThetaStar, Wstar, suppStar
 
