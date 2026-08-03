@@ -46,7 +46,7 @@ def tensor_loss(W, W0prod, Theta, supp_ratio, W0Theta_norm):
     return s1 + supp_ratio, s1
 
 def TT_MSTLS(Theta, x, lambs, total_size, verbose=False, one_pass=False,
-             pi_factors=None):
+             pi_factors=None, slice_scaling=False):
     """
     Tensor-train MSTLS (TT-MSTLS).
 
@@ -91,7 +91,7 @@ def TT_MSTLS(Theta, x, lambs, total_size, verbose=False, one_pass=False,
     W_scaled = Theta.TT_PI(x, factors=pi_factors) if one_pass else Theta.TT_PI(x)
     if one_pass:
         weights = Theta.compute_weights(W_scaled)
-    W0 = Theta.unscale(W_scaled)        # unscale in place -> reference estimate
+    W0 = Theta.unscale(W_scaled) if slice_scaling else W_scaled      # unscale in place -> reference estimate
     # W0prod is fixed across the lambda sweep -> compute once, reuse in the loss
     W0prod = utils.W_contract(W0, Theta)
     W0Theta_norm = np.linalg.norm(W0prod)

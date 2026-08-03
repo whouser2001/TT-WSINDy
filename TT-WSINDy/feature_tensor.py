@@ -91,7 +91,8 @@ class feature_tensor(TT):
         Size of the support induced by a mask.
     """
 
-    def __init__(self, X, f, threshold=0, phi=None, verbose=False, low_rank=True):
+    def __init__(self, X, f, threshold=0, phi=None, verbose=False, low_rank=True,
+                 slice_scaling=False, normalize=True):
         """
         Parameters
         ----------
@@ -104,6 +105,14 @@ class feature_tensor(TT):
             vector. None selects the strong form.
         verbose : bool
             If True, print progress/debugging information.
+        normalize : bool
+            If True (default), each feature f_j(X[d]) is divided by its
+            2-norm during construction, so every feature column enters the
+            tensor at unit scale (feature_norms records the divisors, used to
+            unscale coefficient estimates back to original units). If False,
+            features are left in their raw scale and feature_norms is all ones;
+            the pseudoinverse then sees the un-normalized, scale-disparate
+            library directly.
         low_rank : bool
             Construction method. The naive construction stores diagonal cores
             of shape (M, J, 1, M), i.e. O(D J M^2) memory, which is infeasible
@@ -138,15 +147,17 @@ class feature_tensor(TT):
 
         M = self.snapshots
 
-        # normalized basis evaluations B[j, d, :] = f_j(X[d, :]) / ||.||,
-        # and the per-(feature, dim) norms (shared by both constructions)
-        norms = np.zeros((J, D))
+        # basis evaluations B[j, d, :] = f_j(X[d, :]), optionally normalized by
+        # the per-(feature, dim) 2-norm (shared by both constructions). With
+        # normalize=False the norms stay 1 and features enter at raw scale.
+        norms = np.ones((J, D))
         B = np.zeros((J, D, M))
         for j in range(J):
             fX = np.vectorize(f[j])(X).astype(float)        # (D, M)
-            for d in range(D):
-                nrm = np.linalg.norm(fX[d, :]) if D > 1 else np.linalg.norm(fX)
-                norms[j, d] = nrm if nrm > 0 else 1.0
+            if normalize:
+                for d in range(D):
+                    nrm = np.linalg.norm(fX[d, :]) if D > 1 else np.linalg.norm(fX)
+                    norms[j, d] = nrm if nrm > 0 else 1.0
             B[j] = fX / norms[j][:, None]
 
         if low_rank:
@@ -157,8 +168,7 @@ class feature_tensor(TT):
             # next factor and re-compress with an SVD, so the bonds shrink to the
             # true ranks. Only the final (time) core scales with M.
             #
-            # True ranks are bounded by J^D, so use this when J^D >= M to save
-            # time & memory
+            # Best when used with relatively high M
             cores = []
             C = np.ones((1, M))                              # carry: (r, M)
             for d in range(D):
@@ -218,6 +228,7 @@ class feature_tensor(TT):
         self.feature_norms = norms
         self.supp_indices = [np.arange(J) for _ in range(D)]
         self.threshold = threshold
+        self.slice_scaling = slice_scaling
         
     def all_active_features(self):
         """
@@ -537,7 +548,7 @@ class feature_tensor(TT):
 
         # Recompute W on converged support and unscale
         W = self.TT_PI(x)
-        W = self.unscale(W)
+        if self.slice_scaling: W = self.unscale(W)
 
         return W
     

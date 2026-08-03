@@ -15,12 +15,13 @@ import sparsification
 import itertools
 
 def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
-                testfn=('piecewise_polynomial', 1/20, 16, 1), 
+                testfn=('piecewise_polynomial', 1/40, 16, 1), 
                 loss='default',
                 threshold=0.0,
                 verbosity=0,
                 low_rank=False,
-                one_pass=False):
+                one_pass=False,
+                slice_scaling=False):
     """
     TT-WSINDy.
  
@@ -52,6 +53,11 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
                 o : int
                     order of the ODE to be discovered. An oth-order ODE
                     requires 'dphi' to be the oth-order derivative.
+            2.  name : manual
+                phi : np.array
+                    discretized phi data
+                dphi: np.array
+                    discretized phi derivative data
     loss : str
         Loss function. Currently supported:
             1. name : default
@@ -107,6 +113,8 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
         phi, dphi = test_function.piecewise_polynomial(
             radius, degree, t0, tM, M, order=testfn[3]
         )
+    elif testfn[0] == 'manual':
+        phi, dphi = testfn[1:]
     elif testfn[0] == 'Cinfty_bump':
         return NotImplementedError
     else:
@@ -134,7 +142,6 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
     # once here and reused across dimensions
     pi_factors = Theta.TT_PI_factors() if one_pass else None
 
-    # TODO add functionality to run these loops in parallel
     tt_mstls_time = 0
     mstls_time = 0
     for d in range(D):
@@ -186,13 +193,11 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
 
         G = correlate(G, phi, mode='valid').transpose()
 
-        mstls_st = time()
-
         # fine pass: MSTLS
+        mstls_st = time()
         wStar, suppStar = sparsification.MSTLS(
             G, y_d, flatlambs, verbose=debug
         )
-
         mstls_end = time()
 
         W.append(wStar)

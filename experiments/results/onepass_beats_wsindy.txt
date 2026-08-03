@@ -1,2 +1,0 @@
-# J D J^D TT_time flat_time TT_recover flat_recover M
-5 5 3125 15.2693 66.396 5 0 5000

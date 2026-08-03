@@ -501,7 +501,15 @@ class wsindy:
         return V, Vp, ab_grid, # ps
 
 
-    def sparsifyDynamics(self, Theta, dXdt, n, M=None):
+    def sparsifyDynamics(self, Theta, dXdt, n, M=None, pinv=None):
+        # pinv : optional precomputed pseudoinverse of Theta_reg. Theta does not
+        # depend on the target dXdt, so when the same library is regressed
+        # against several targets (e.g. one per state dimension) its
+        # pseudoinverse can be formed ONCE and reused for the initial
+        # least-squares solve here, instead of refactorizing per call. This
+        # mirrors TT-WSINDy reusing its pseudoinverse SVD (TT_PI_factors) across
+        # dimensions, so walltime comparisons are apples-to-apples. Only valid
+        # for gamma == 0 (pinv must be the pseudoinverse of Theta itself).
         if M is None:
             M = np.ones((Theta.shape[1], 1))
 
@@ -515,11 +523,14 @@ class wsindy:
             dXdt_reg_temp = np.vstack((dXdt, self.gamma*np.zeros((nn, n))))
             dXdt_reg = np.reshape(dXdt_reg_temp, (dXdt_reg_temp.size, 1))
             #print(nn)
-        
+
         #print("theta", Theta_reg.shape)
         #print("dXdt_reg", dXdt_reg.shape)
 
-        Xi = M*(lstsq(Theta_reg, dXdt_reg)[0])
+        if pinv is None:
+            Xi = M*(lstsq(Theta_reg, dXdt_reg)[0])
+        else:
+            Xi = M*(pinv @ dXdt_reg)
 
         for i in range(10):
             smallinds = (abs(Xi) < self.ld)
