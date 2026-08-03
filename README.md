@@ -1,1 +1,1 @@
-# WSINDy-T.py
+# TT-WSINDy
