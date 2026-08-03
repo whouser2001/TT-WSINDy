@@ -5,7 +5,6 @@ import numpy as np
 import numpy.linalg as la
 import copy
 from scikit_tt.tensor_train import TT
-from feature_tensor import feature_tensor
 
 def W_contract(W, Theta):
     """
@@ -116,3 +115,69 @@ def mask_coeffs(W, supp):
         core[:, ~supp[d], :, :] = 0.0
         cores.append(core)
     return TT(cores)
+
+def truncated_svd(A, threshold, small=700, n_oversamples=12, n_iter=2):
+    """
+    Thin SVD keeping the singular triplets with s > tol (= rel*s[0]), where
+    rel = threshold (or 1e-13 if threshold==0).
+
+    For a tall/wide matrix whose effective rank is far below min(A.shape) -- as
+    happens at the weak feature tensor's time-core bond, where convolving with
+    the test function collapses the rank -- a full SVD wastes almost all its
+    work. This uses a randomized range finder [1] with an adaptive target rank.
+
+    Parameters
+    ----------
+    A : np.array
+        Matrix to be SVDed
+    threshold : float
+        SVD thresholding parameter
+    small : int
+        Rough size at which full SVD is computationally preferable
+    n_oversamples : int
+        Small number of Monte Carlo oversamples. Drastically mproves expected 
+        accuracy of the SVD.
+    n_iter : int
+        Number of QR iterations per rank searched over.
+    
+    Returns 
+    -------
+    U : np.array
+        Left-orthonormal columns
+    s : np.array
+        diagonal entries of Sigma
+    Vt : np.array
+        Right-orthonormal columns
+
+    References
+    ----------
+    .. [1] N. Halko, P. G. Martinsson, and J. A. Tropp, "Finding Structure with
+            Randomness: Probabilistic Algorithms for Constructing Approximate
+            Matrix Decompositions", SIAM Review, 53 (2011) pp. 217-288, 
+            https://doi.org/10.1137/090771806
+    """
+    m, n = A.shape
+    p = min(m, n)
+    rel = threshold if threshold > 0 else 1e-13
+
+    if p <= small:                                    # full SVD already cheap
+        U, s, Vt = np.linalg.svd(A, full_matrices=False)
+    else:
+        rng = np.random.default_rng(0)
+        target = 256
+        while True:
+            ell = min(target + n_oversamples, p)
+            Q, _ = np.linalg.qr(A @ rng.standard_normal((n, ell)))
+            for _ in range(n_iter):                   # power iters (sharpen gap)
+                Q, _ = np.linalg.qr(A @ (A.T @ Q))
+            B = Q.T @ A                               # (ell, n), small
+            Ub, s, Vt = np.linalg.svd(B, full_matrices=False)
+            U = Q @ Ub
+            s0 = s[0] if s.size and s[0] > 0 else 1.0
+            if ell >= p or s[-1] <= rel * s0:         # captured all significant
+                break
+            target = min(target * 2, p)               # else widen and retry
+
+    s0 = s[0] if s.size and s[0] > 0 else 1.0
+    k = max(int(np.sum(s > rel * s0)), 1)
+    return U[:, :k], s[:k], Vt[:k]

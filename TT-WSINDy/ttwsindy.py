@@ -8,7 +8,6 @@ import numpy as np
 import copy
 from scipy.signal import correlate
 from time import time
-from scikit_tt import tensor_train
 import test_function
 from feature_tensor import feature_tensor
 import sparsification
@@ -20,8 +19,7 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
                 threshold=0.0,
                 verbosity=0,
                 low_rank=False,
-                one_pass=False,
-                slice_scaling=False):
+                one_pass=False):
     """
     TT-WSINDy.
  
@@ -74,11 +72,12 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
     low_rank : bool
         If true, builds feature tensor directly in compressed
         form by a left-to-right SVD sweep over a small "carry" matrix.
-        Best when M >> J^D
+        Preferred when M is large.
     one_pass : bool
         If true, performs TT-STLS non-iteratively; only performing
         a single regression/sparsification step.
- 
+        Preferred roughly when J^D is of the order 10^3 or smaller.
+
     Returns
     -------
     W : list of np.ndarray
@@ -115,10 +114,9 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
         )
     elif testfn[0] == 'manual':
         phi, dphi = testfn[1:]
-    elif testfn[0] == 'Cinfty_bump':
-        return NotImplementedError
     else:
-        return NotImplementedError
+        return NotImplementedError('Test function string ' \
+        'not supported. Enter one of piecewise_polynomial, manual.')
     
     Theta = feature_tensor(X, f, 
                             threshold=threshold,
@@ -132,15 +130,14 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
     Y = -1*correlate(X, dphi, mode='valid').transpose()    # (Mp, D)
 
     # store per-dimension results
-    W = []
-    supp = []
+    Ws = []
+    supps = []
     feature_maps = []
     coarse_supps = []
 
-    # the one_pass coarse pass solves the SAME feature tensor against each of
-    # the D targets, so the pseudoinverse SVD (the dominant cost) is computed
-    # once here and reused across dimensions
-    pi_factors = Theta.TT_PI_factors() if one_pass else None
+    # If one_pass, compute the single TT SVD here
+    pi_factors = Theta.svd(D, threshold=Theta.threshold,
+                        ortho_l=True, ortho_r=True, overwrite=False) if one_pass else None
 
     tt_mstls_time = 0
     mstls_time = 0
@@ -200,8 +197,8 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
         )
         mstls_end = time()
 
-        W.append(wStar)
-        supp.append(suppStar)
+        Ws.append(wStar)
+        supps.append(suppStar)
         feature_maps.append(feature_map)
         
         tt_mstls_time += tt_mstls_end - tt_mstls_st
@@ -216,4 +213,4 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
         print(f'MSTLS runtime: {mstls_time}')
         print('------------------')
 
-    return W, supp, feature_maps, ttwsindy_time, tt_mstls_time, mstls_time, coarse_supps
+    return Ws, supps, feature_maps, ttwsindy_time, tt_mstls_time, mstls_time, coarse_supps

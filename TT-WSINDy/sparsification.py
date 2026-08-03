@@ -69,7 +69,7 @@ def TT_MSTLS(Theta, x, lambs, total_size, verbose=False, one_pass=False,
     one_pass : bool
         If True, only performs a single regression/sparsification step.
     pi_factors : tuple, optional
-        Precomputed pseudoinverse SVD factors (from Theta.TT_PI_factors()) for
+        Precomputed pseudoinverse SVD factors for
         the one_pass solve. The factors depend only on Theta, not x, so when
         TT-WSINDy regresses the same feature tensor against each of the D
         targets they can be computed once and shared, skipping the (dominant)

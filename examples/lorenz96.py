@@ -32,8 +32,7 @@ if __name__ == '__main__':
     X = odeint(L96, x0, t).T
     f = [
         lambda x : 1,
-        lambda x : x,
-        lambda x : np.sin(x)        # superfluous basis feature
+        lambda x : x
     ]
     J = len(f)
 
@@ -47,16 +46,16 @@ if __name__ == '__main__':
         10**(-11), 2.5*10**(-6), num
     )
 
-    eps = 10**(-18)
-    results = TT_WSINDy(X, 0, tn, f, TTlambs, flatlambs, verbosity=1,
-              threshold=eps, low_rank=False)
+    eps = 10**(-16)
+    results = TT_WSINDy(X, 0, tn, f, TTlambs, flatlambs, verbosity=0,
+              threshold=eps, low_rank=True)
     
     supps = results[1]
     feature_maps = results[2]
 
     fstr = [lambda n : '',
-            lambda n : f'x_{n}',
-            lambda n : f'x_{n}^2']
+            lambda n : f'x_{n}']
+
     for d1 in range(D):
 
         supp = supps[d1]
@@ -72,3 +71,6 @@ if __name__ == '__main__':
             if k != supp[-1]: str += ' + '
         
         print(str)
+
+    print()
+    print(f'walltime = {results[3]}')

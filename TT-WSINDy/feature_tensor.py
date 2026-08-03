@@ -5,65 +5,13 @@ import numpy as np
 from time import time
 from scikit_tt.tensor_train import TT
 from scipy.signal import correlate
-
-
-def _truncated_svd(A, threshold, small=700, n_oversamples=12, n_iter=2):
-    """
-    Thin SVD keeping the singular triplets with s > tol (= rel*s[0]), where
-    rel = threshold (or 1e-13 if threshold==0).
-
-    For a tall/wide matrix whose effective rank is far below min(A.shape) -- as
-    happens at the weak feature tensor's time-core bond, where convolving with
-    the test function collapses the rank -- a full SVD wastes almost all its
-    work. This uses a randomized range finder (Halko-Martinsson-Tropp) with an
-    adaptive target rank: the rank is doubled until the smallest computed
-    singular value drops below tol (so the entire significant subspace is
-    captured), with a full-SVD fallback for small matrices or genuinely
-    high-rank inputs. Returns U (orthonormal columns), s, Vt truncated to the
-    kept rank.
-    """
-    m, n = A.shape
-    p = min(m, n)
-    rel = threshold if threshold > 0 else 1e-13
-
-    if p <= small:                                    # full SVD already cheap
-        U, s, Vt = np.linalg.svd(A, full_matrices=False)
-    else:
-        rng = np.random.default_rng(0)
-        target = 256
-        while True:
-            ell = min(target + n_oversamples, p)
-            Q, _ = np.linalg.qr(A @ rng.standard_normal((n, ell)))
-            for _ in range(n_iter):                   # power iters (sharpen gap)
-                Q, _ = np.linalg.qr(A @ (A.T @ Q))
-            B = Q.T @ A                               # (ell, n), small
-            Ub, s, Vt = np.linalg.svd(B, full_matrices=False)
-            U = Q @ Ub
-            s0 = s[0] if s.size and s[0] > 0 else 1.0
-            if ell >= p or s[-1] <= rel * s0:         # captured all significant
-                break
-            target = min(target * 2, p)               # else widen and retry
-
-    s0 = s[0] if s.size and s[0] > 0 else 1.0
-    k = max(int(np.sum(s > rel * s0)), 1)
-    return U[:, :k], s[:k], Vt[:k]
-
+from ttutils import truncated_svd
 
 class feature_tensor(TT):
     """
     Build a tensor train of feature cores from data and a list of
     candidate functions. Extends the TT (tensor train) class from
     scikit-tt.
-
-    Parameters
-    ----------
-    X : np.ndarray
-        Raw data, shape D x M (D system dimensions, M time points).
-    f : list of callable
-        Candidate functions fj : R -> R.
-    phi : np.ndarray or None
-        Discretization of a compactly supported test function, as a
-        vector. None selects the strong form.
 
     Methods
     -------
@@ -92,7 +40,7 @@ class feature_tensor(TT):
     """
 
     def __init__(self, X, f, threshold=0, phi=None, verbose=False, low_rank=True,
-                 slice_scaling=False, normalize=True):
+                 slice_scaling=False, normalize=False):
         """
         Parameters
         ----------
@@ -100,6 +48,9 @@ class feature_tensor(TT):
             Raw data, shape D x M (D system dimensions, M time points).
         f : list of callable
             Candidate functions fj : R -> R.
+        threshold : float
+            Truncation parameter applied to the matrix SVDs in TT-PI.
+            threshold=0.0 computes pseudoinverses exactly.
         phi : np.ndarray or None
             Discretization of a compactly supported test function, as a
             vector. None selects the strong form.
@@ -199,7 +150,7 @@ class feature_tensor(TT):
                     # amplified by 1/sigma in the TT_PI pseudoinverse).
                     Ec = E if phi is None else correlate(
                         E, np.expand_dims(phi, axis=0), mode='valid')   # (rJ, Mp)
-                    U, s, Vt = _truncated_svd(Ec, threshold)
+                    U, s, Vt = truncated_svd(Ec, threshold)
                     cores.append(U.reshape(r, J, 1, U.shape[1]))        # feature core
                     cores.append((s[:, None] * Vt).reshape(            # time core
                         U.shape[1], Ec.shape[1], 1, 1))
@@ -393,26 +344,6 @@ class feature_tensor(TT):
         
         self.cores = cores_prime
 
-
-    def TT_PI_factors(self):
-        """
-        SVD factors of the feature-tensor pseudoinverse.
-
-        These (U, Sigma, V) depend only on the feature tensor, not on the
-        regression target, so they can be computed once and reused across the
-        D per-dimension targets (the SVD is the cost of TT_PI). Pass the result
-        to TT_PI(x, factors=...).
-
-        Returns
-        -------
-        factors : tuple (TT, np.ndarray, TT)
-            Left factor, singular values, right factor at the split before the
-            weak/strong core.
-        """
-        D = self.order - 1
-        return self.svd(D, threshold=self.threshold,
-                        ortho_l=True, ortho_r=True, overwrite=False)
-
     def TT_PI(self, x, factors=None):
         """
         TT pseudoinverse regression.
@@ -426,7 +357,7 @@ class feature_tensor(TT):
         x : np.ndarray
             Target values to regress against, length self.Mp.
         factors : tuple (TT, np.ndarray, TT), optional
-            Precomputed pseudoinverse SVD factors from TT_PI_factors(). When
+            Precomputed pseudoinverse SVD factors. When
             given, the (target-independent) global SVD is skipped and reused.
             The factor cores are copied here so the returned W can be mutated
             (e.g. unscale) without corrupting the shared factors.
