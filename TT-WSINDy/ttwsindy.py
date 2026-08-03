@@ -15,11 +15,13 @@ import sparsification
 import itertools
 
 def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
-                testfn=('piecewise_polynomial', 1/20, 16, 1), 
+                testfn=('piecewise_polynomial', 1/40, 16, 1), 
                 loss='default',
                 threshold=0.0,
                 verbosity=0,
-                low_rank=False):
+                low_rank=False,
+                one_pass=False,
+                slice_scaling=False):
     """
     TT-WSINDy.
  
@@ -51,6 +53,11 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
                 o : int
                     order of the ODE to be discovered. An oth-order ODE
                     requires 'dphi' to be the oth-order derivative.
+            2.  name : manual
+                phi : np.array
+                    discretized phi data
+                dphi: np.array
+                    discretized phi derivative data
     loss : str
         Loss function. Currently supported:
             1. name : default
@@ -64,6 +71,13 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
                 information (verbose)
             2 : additionally print weights, support, and loss at every
                 tested lambda (debug)
+    low_rank : bool
+        If true, builds feature tensor directly in compressed
+        form by a left-to-right SVD sweep over a small "carry" matrix.
+        Best when M >> J^D
+    one_pass : bool
+        If true, performs TT-STLS non-iteratively; only performing
+        a single regression/sparsification step.
  
     Returns
     -------
@@ -99,6 +113,8 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
         phi, dphi = test_function.piecewise_polynomial(
             radius, degree, t0, tM, M, order=testfn[3]
         )
+    elif testfn[0] == 'manual':
+        phi, dphi = testfn[1:]
     elif testfn[0] == 'Cinfty_bump':
         return NotImplementedError
     else:
@@ -121,11 +137,15 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
     feature_maps = []
     coarse_supps = []
 
-    # TODO add functionality to run these loops in parallel
+    # the one_pass coarse pass solves the SAME feature tensor against each of
+    # the D targets, so the pseudoinverse SVD (the dominant cost) is computed
+    # once here and reused across dimensions
+    pi_factors = Theta.TT_PI_factors() if one_pass else None
+
     tt_mstls_time = 0
     mstls_time = 0
     for d in range(D):
-        
+
         # coarse pass: TT-MSTLS
         if d < D-1: Theta_d = copy.deepcopy(Theta)
         else: Theta_d = Theta
@@ -134,7 +154,8 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
 
         y_d = Y[:,d] if D > 1 else Y
         Theta_star, wStar, suppStar = sparsification.TT_MSTLS(
-            Theta_d, y_d, TTlambs, problemSize, verbose=debug
+            Theta_d, y_d, TTlambs, problemSize, verbose=debug,
+            one_pass=one_pass, pi_factors=pi_factors
         )
         
         tt_mstls_end = time()
@@ -172,13 +193,11 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
 
         G = correlate(G, phi, mode='valid').transpose()
 
-        mstls_st = time()
-
         # fine pass: MSTLS
+        mstls_st = time()
         wStar, suppStar = sparsification.MSTLS(
             G, y_d, flatlambs, verbose=debug
         )
-
         mstls_end = time()
 
         W.append(wStar)

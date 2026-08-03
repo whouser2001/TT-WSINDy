@@ -1,0 +1,6 @@
+# flat WSINDy walltime, mean/sd over 1 trials
+# D  N=2^D  t_flat  t_flat_sd  supp_size
+13 8192 2050.05 0 106116
+14 16384 3144.17 0 227642
+15 32768 5242.39 0 483200
+16 65536 10166.3 0 1.01636e+06

@@ -87,3 +87,32 @@ def embed_full(W, active_features, full_dims):
         cores_full.append(core)
 
     return TT(cores_full)
+
+def mask_coeffs(W, supp):
+    """
+    Restrict a full-support coefficient TT to a product support by zeroing the
+    feature slices that fall outside the per-dimension masks.
+
+    Zeroing feature slice j in dimension d kills every contraction term that
+    uses feature j in that dimension, so the result equals W on the product
+    support (j_0,...,j_{D-1} with each j_d kept) and 0 elsewhere. Used by
+    one-pass TT-MSTLS to score a candidate support without re-solving.
+
+    Parameters
+    ----------
+    W : TT
+        Full-support coefficient tensor (row_dims all J).
+    supp : list of np.ndarray
+        Per-dimension boolean masks; supp[d] has length W.row_dims[d].
+
+    Returns
+    -------
+    W_masked : TT
+        Copy of W with out-of-support feature slices set to zero; same shape.
+    """
+    cores = []
+    for d in range(W.order):
+        core = W.cores[d].copy()
+        core[:, ~supp[d], :, :] = 0.0
+        cores.append(core)
+    return TT(cores)

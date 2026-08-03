@@ -1,9 +1,10 @@
 """
 Fermi-pasta-ulam-tsingou simulation
 """
-import os,sys
+import os,sys,itertools
 sys.path.insert(0, '.')
 sys.path.insert(0, '../TT-WSINDy')
+sys.path.insert(0, '../WSINDy')
 sys.path.insert(0, '../../TT-WSINDy')
 import numpy as np
 import copy
@@ -13,6 +14,7 @@ from test_function import piecewise_polynomial
 from ttwsindy import TT_WSINDy
 from scipy.signal import correlate
 from scipy.integrate import odeint
+from wsindy import wsindy
 
 """
 Trajectory-based Fermi-Pasta-Ulam-Tsingou generator for weak-form
@@ -34,6 +36,25 @@ x_{-1} = x_n = 0, matching the original scikit-tt generator.
 """
 import numpy as np
 
+def print_supp(fstr, supps, feature_maps):
+
+    D = len(supps)
+    for d1 in range(D):
+
+        supp = supps[d1]
+        feature_map = feature_maps[d1]
+        str = f'x_{d1 + 1}\' : '
+
+        if supp is not None:
+            for k in supp:
+                substr = ''
+                for d2 in range(D):
+                    substr += fstr[feature_map[k][d2]](d2+1)
+                if substr == '': substr += '1'
+                str += substr
+                if k != supp[-1]: str += '  '
+
+        print(str)
 
 def _fpu_force(x, beta):
     """Acceleration field F(x) with fixed walls x_{-1} = x_n = 0.
@@ -155,15 +176,58 @@ if __name__ == "__main__":
         lambda x : x**2,
         lambda x : x**3
     ]
+    fstr = [
+        lambda n : '',
+        lambda n : f'x_{n}',
+        lambda n : f'x_{n}^2',
+        lambda n : f'x_{n}^3'
+    ]
     J = len(f)
 
-    nTT = 15
-    TTlambs = 10**((2/nTT)*np.arange(0,nTT+1)-3)
-    nMat = 25
-    Matlambs = 10**((7/nMat)*np.arange(0,nMat+1)-10)
+    nTT = 10
+    TTlambs = np.logspace(1e-9, 1e-2, nTT)
+    Matlambs = np.logspace(1e-9, 1e-2, nTT)
 
     eps = 10**(-16)
     results = TT_WSINDy(X, t[0], t[-1], f, TTlambs, Matlambs,
-                        testfn=('piecewise_polynomial',1/20,16,2),
+                        testfn=('piecewise_polynomial',1/40,16,2),
                         threshold=eps,
-                        verbosity=2)
+                        verbosity=1,
+                        low_rank=True,
+                        one_pass=True)
+    
+    (supps,feature_maps,ttwsindy_time,ttmstls_time,mstls_time) = results[1:6]
+    print('TT-WSINDy complete')
+    print(f'full time {ttwsindy_time}')
+    print(f'tt-mstls time {ttmstls_time}')
+    print(f'mstls time {mstls_time}')
+    print('Discovered support:')
+    print_supp(fstr, supps, feature_maps)
+
+    print()
+    st = time()
+    phi, dphi = piecewise_polynomial((t[-1]-t[0])/40, 16, t[0], t[-1], M, order=2)
+    fmap = list(itertools.product(*[range(J)]*D))
+    basis = np.stack([np.vectorize(fj)(X).astype(float) for fj in f])
+    G = np.ones((J**D, M))
+    for k, tup in enumerate(fmap):
+        for d in range(D):
+            G[k] *= basis[tup[d], d]
+    Gc = correlate(G, np.expand_dims(phi, 0), mode='valid').T   # (Mp, J^D)
+    Y = -1*correlate(X, np.expand_dims(dphi, 0), mode='valid').T
+    M_diag = np.linalg.norm(Gc, 2, 0); M_diag[M_diag == 0] = 1.0
+    Gn = Gc / M_diag
+    Gn_pinv = np.linalg.pinv(Gn)
+    supps, Ws = [], []
+    FLAT_LD = 1e-3
+    for d in range(D):
+        model = wsindy(ld=FLAT_LD, gamma=0.0, scaled_theta=2)   # fresh (ld mutates)
+        Xi = model.sparsifyDynamics(Gn, Y[:, d], 1, pinv=Gn_pinv)   # reuse cached pinv
+        w = np.ndarray.flatten(Xi) / M_diag                     # unscale
+        s = np.where(w != 0)[0]
+        supps.append(s); Ws.append(w[s])
+    end = time() - st
+    print('WSINDy Complete')
+    print(f'wsindy time {end}')
+    #print('Discovered support')
+    #print_supp(fstr, supps, fmap)

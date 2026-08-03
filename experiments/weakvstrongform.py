@@ -238,36 +238,40 @@ def tt_pi_coeffs(Theta, y, threshold, D, J):
     The raw estimate lives in the normalized feature space; dividing by the
     per-monomial norm product undoes feature_tensor's column scaling.
     """
-    W = Theta.TT_PI(y, threshold=threshold)
+    W = Theta.TT_PI(y)
     raw = np.asarray(W.full()).reshape((J,) * D)
     return raw / _norm_product(Theta, D, J)
 
 
 def weak_coefficients(X, f, t0, tM, M, D, J,
-                      r_frac=1.0 / 60.0, degree=16, threshold=1e-10):
+                      r_frac=1.0 / 60.0, degree=16, threshold=1e-10,
+                      normalize=True):
     """TT-WSINDy (weak form) coefficient tensors, one row per output dim.
 
     The LHS is the weak projection <x, phi''> (test-function order 2, so phi''
     carries both derivatives); the library is convolved with phi. No derivative
-    of the data is computed.
+    of the data is computed. `normalize` toggles feature_tensor's per-feature
+    column normalization.
     """
     phi, dphi = piecewise_polynomial((tM - t0) * r_frac, degree, t0, tM, M,
                                      order=2)
-    Theta = feature_tensor(X, f, phi=phi)
+    Theta = feature_tensor(X, f, phi=phi, normalize=normalize)
     # the order-2 dphi equals -phi'', so -correlate(X, dphi) = <x, phi''>
     Y = -1 * correlate(X, np.expand_dims(dphi, axis=0), mode='valid').transpose()
     return np.stack([tt_pi_coeffs(Theta, Y[:, d], threshold, D, J)
                      for d in range(D)])
 
 
-def strong_coefficients(X, f, dt, D, J, threshold=1e-10):
+def strong_coefficients(X, f, dt, D, J, threshold=1e-10, normalize=True):
     """MANDy (strong form) coefficient tensors, one row per output dim.
 
     The LHS x'' is a 3-point central finite difference of the trajectory; the
     library is sampled pointwise at the interior snapshots where x'' is defined.
+    `normalize` toggles feature_tensor's per-feature column normalization.
     """
     Xddot = (X[:, 2:] - 2 * X[:, 1:-1] + X[:, :-2]) / dt ** 2   # (D, M-2)
-    Theta = feature_tensor(X[:, 1:-1], f, phi=None)             # strong form
+    Theta = feature_tensor(X[:, 1:-1], f, phi=None,             # strong form
+                           normalize=normalize)
     return np.stack([tt_pi_coeffs(Theta, Xddot[d], threshold, D, J)
                      for d in range(D)])
 
@@ -309,6 +313,8 @@ if __name__ == "__main__":
     r_frac = 1.0 / 60.0 # test-function radius as a fraction of the time span
     degree = 16         # test-function polynomial degree
     threshold = 1e-10   # TT-PI singular-value truncation (regularized pinv)
+    NORMALIZE = False   # per-feature column normalization in feature_tensor
+    suffix = "" if NORMALIZE else "_nonorm"   # keep the normalized baseline files
 
     noise_levels = np.array([1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 3e-4, 1e-3, 1e-2, 1e-1])
     n_trials = 3        # noise realizations averaged per level
@@ -342,9 +348,11 @@ if __name__ == "__main__":
     Wtrue = np.stack(true_coeffs(D, J, beta))
 
     # ----- clean-data sanity report -----
-    Ww0 = weak_coefficients(X, f, t0, tM, M, D, J,
-                            r_frac=r_frac, degree=degree, threshold=threshold)
-    Ws0 = strong_coefficients(X, f, dt, D, J, threshold=threshold)
+    Ww0 = weak_coefficients(X, f, t0, tM, M, D, J, r_frac=r_frac, degree=degree,
+                            threshold=threshold, normalize=NORMALIZE)
+    Ws0 = strong_coefficients(X, f, dt, D, J, threshold=threshold,
+                              normalize=NORMALIZE)
+    print(f"per-feature normalization: {NORMALIZE}")
     print("clean-data relative coefficient error (no noise):")
     print(f"  TT-WSINDy (weak)  : {rel_err(Ww0, Wtrue):.3e}")
     print(f"  MANDy     (strong): {rel_err(Ws0, Wtrue):.3e}")
@@ -368,9 +376,10 @@ if __name__ == "__main__":
         for tr in range(n_trials):
             rng = np.random.default_rng(1000 * i + tr)
             Xn = X + sigma * xstd * rng.standard_normal(X.shape)
-            Ww = weak_coefficients(Xn, f, t0, tM, M, D, J,
-                                   r_frac=r_frac, degree=degree, threshold=threshold)
-            Ws = strong_coefficients(Xn, f, dt, D, J, threshold=threshold)
+            Ww = weak_coefficients(Xn, f, t0, tM, M, D, J, r_frac=r_frac,
+                                   degree=degree, threshold=threshold, normalize=NORMALIZE)
+            Ws = strong_coefficients(Xn, f, dt, D, J, threshold=threshold,
+                                     normalize=NORMALIZE)
             weak_err[i, tr] = rel_err(Ww, Wtrue)
             strong_err[i, tr] = rel_err(Ws, Wtrue)
         wm, sm = weak_err[i].mean(), strong_err[i].mean()
@@ -383,7 +392,7 @@ if __name__ == "__main__":
     out = np.column_stack([noise_levels,
                            weak_err.mean(1), weak_err.std(1),
                            strong_err.mean(1), strong_err.std(1)])
-    np.savetxt("results/weakvstrongform.txt", out,
+    np.savetxt(f"results/weakvstrongform{suffix}.txt", out,
                header="noise weak_mean weak_std strong_mean strong_std")
 
     # ----- plot -----
@@ -401,9 +410,10 @@ if __name__ == "__main__":
     plt.yscale('log')
     plt.xlabel(r'relative noise level $\sigma$')
     plt.ylabel('relative coefficient error')
-    plt.title(f'Weak vs. strong form TT-PI on FPUT (D={D}, M={M})')
+    norm_tag = 'per-feature norm.' if NORMALIZE else 'NO feature norm.'
+    plt.title(f'Weak vs. strong form TT-PI on FPUT (D={D}, M={M}, {norm_tag})')
     plt.legend()
     plt.grid(True, which='both', ls=':', alpha=0.5)
     plt.tight_layout()
-    plt.savefig("results/weakvstrongform.png", dpi=150)
+    plt.savefig(f"results/weakvstrongform{suffix}.png", dpi=150)
     plt.show()
