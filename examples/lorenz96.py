@@ -7,12 +7,7 @@ sys.path.insert(0, '.')
 sys.path.insert(0, '../TT-WSINDy')
 sys.path.insert(0, '../../TT-WSINDy')
 import numpy as np
-import copy
-from time import time
-from feature_tensor import feature_tensor
-from test_function import piecewise_polynomial
 from ttwsindy import TT_WSINDy
-from scipy.signal import correlate
 from scipy.integrate import odeint
 
 if __name__ == '__main__':
@@ -48,7 +43,7 @@ if __name__ == '__main__':
 
     eps = 10**(-16)
     results = TT_WSINDy(X, 0, tn, f, TTlambs, flatlambs, verbosity=0,
-              threshold=eps, low_rank=True)
+              threshold=eps, low_rank=True, one_pass=True)
     
     supps = results[1]
     feature_maps = results[2]
@@ -68,7 +63,7 @@ if __name__ == '__main__':
                 substr += fstr[feature_map[k][d2]](d2+1)
             if substr == '': substr += '1'
             str += substr
-            if k != supp[-1]: str += ' + '
+            if k != supp[-1]: str += ', '
         
         print(str)
 

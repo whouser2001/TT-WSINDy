@@ -126,7 +126,7 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
     
     # compute the weak-form left-hand side
     phi = np.expand_dims(phi, axis=0)
-    if D > 1: dphi = np.expand_dims(dphi,axis=0)
+    if D > 1: dphi = np.expand_dims(dphi, axis=0)
     Y = -1*correlate(X, dphi, mode='valid').transpose()    # (Mp, D)
 
     # store per-dimension results

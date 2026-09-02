@@ -9,7 +9,6 @@ from feature_tensor import feature_tensor
 import ttutils as utils
 from time import time
 
-
 def tensor_loss(W, W0prod, Theta, supp_ratio, W0Theta_norm):
     """
     MSTLS loss for a tensor-train coefficient estimate.
@@ -38,15 +37,11 @@ def tensor_loss(W, W0prod, Theta, supp_ratio, W0Theta_norm):
     diff_norm : float
         The relative fit-difference term on its own.
     """
-    # W contracted with Theta, minus W0 contracted with Theta.
-    # Note: W - W0 is NOT elementwise subtraction on a TT, so
-    # (W - W0) x Theta would not give the intended difference.
     Wprod = utils.W_contract(W, Theta)
     s1 = np.linalg.norm(Wprod - W0prod)/W0Theta_norm
     return s1 + supp_ratio, s1
 
-def TT_MSTLS(Theta, x, lambs, total_size, verbose=False, one_pass=False,
-             pi_factors=None, slice_scaling=False):
+def TT_MSTLS(Theta, x, lambs, total_size, verbose=False, one_pass=False, pi_factors=None):
     """
     Tensor-train MSTLS (TT-MSTLS).
 
@@ -70,10 +65,7 @@ def TT_MSTLS(Theta, x, lambs, total_size, verbose=False, one_pass=False,
         If True, only performs a single regression/sparsification step.
     pi_factors : tuple, optional
         Precomputed pseudoinverse SVD factors for
-        the one_pass solve. The factors depend only on Theta, not x, so when
-        TT-WSINDy regresses the same feature tensor against each of the D
-        targets they can be computed once and shared, skipping the (dominant)
-        global SVD on every dimension. Ignored by the iterative path.
+        the one_pass solve. Ignored by the iterative path.
 
     Returns
     -------
@@ -86,13 +78,11 @@ def TT_MSTLS(Theta, x, lambs, total_size, verbose=False, one_pass=False,
         Surviving candidate-function indices per dimension.
     """
 
-    # single non-thresholded solve: weights (from the SCALED estimate, as in
-    # TT_STLS) and the unscaled reference W0 used by the loss. One TT_PI total.
-    W_scaled = Theta.TT_PI(x, factors=pi_factors) if one_pass else Theta.TT_PI(x)
+    W0 = Theta.TT_PI(x, factors=pi_factors) if one_pass else Theta.TT_PI(x)
     if one_pass:
-        weights = Theta.compute_weights(W_scaled)
-    W0 = Theta.unscale(W_scaled) if slice_scaling else W_scaled      # unscale in place -> reference estimate
-    # W0prod is fixed across the lambda sweep -> compute once, reuse in the loss
+        weights = Theta.compute_weights(W0)
+
+    # Compute W0prod once, reuse in the loss
     W0prod = utils.W_contract(W0, Theta)
     W0Theta_norm = np.linalg.norm(W0prod)
 
@@ -104,11 +94,7 @@ def TT_MSTLS(Theta, x, lambs, total_size, verbose=False, one_pass=False,
     Theta.verbose = False
 
     if one_pass:
-        # ---- single-solve coarse selection ----
-        # Sweep lambda, thresholding the cached weights into a candidate product
-        # support and scoring it by masking W0 to that support (no re-solve).
-        # Keep the lowest-loss support and reduce Theta to it once, so the fine
-        # pass sees the reduction.
+
         best_mask = None
         for i, lamb in enumerate(lambs):
 
@@ -133,12 +119,12 @@ def TT_MSTLS(Theta, x, lambs, total_size, verbose=False, one_pass=False,
                 print(f'lambda = {lamb}, loss = {loss}')
                 print(f'min_loss = {min_loss}')
 
-        # reduce Theta to the winning support so the fine pass sees it
+        # reduce Theta to the winning support
         Theta.apply_supp(best_mask)
         suppStar = Theta.all_active_features()
         return Theta, Wstar, suppStar
 
-    # ---- iterative TT-STLS coarse selection ----
+    # Iterative TT-STLS
     weight_cache = {}
     for i in range(len(lambs)):
 

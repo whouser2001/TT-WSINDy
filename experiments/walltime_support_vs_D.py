@@ -2,62 +2,12 @@
 Walltime and support-recovery scan vs system dimension D for the standard
 Lorenz-96 identification problem.
 
-Three sparsifiers are compared on the SAME weak form and the SAME {1, x}
-tensor-product library (J^D candidates/equation):
-
-  1. low-rank one-pass TT-WSINDy, TT-PI SVD truncation  eps = 1e-16
-  2. low-rank one-pass TT-WSINDy, TT-PI SVD truncation  eps = 1e-10
-  3. flat (matrix) WSINDy, sparsified by the ORIGINAL WSINDy-folder code
-     (WSINDy/wsindy.py :: wsindy.sparsifyDynamics), on the full J^D library.
-
-`eps` is TT_WSINDy's `threshold` argument -- the relative tolerance used to
-truncate the matrix SVDs inside the TT pseudoinverse (TT-PI). eps=1e-16 is
-effectively exact; eps=1e-10 truncates more aggressively (faster, at the risk
-of dropping weak terms). Comparing the two shows that speed/accuracy trade-off.
-
-The flat sparsifier is the repo's own WSINDy STLS engine (sparsifyDynamics,
-with L2 column normalization). It is wrapped in a threshold (lambda) sweep with
-loss-based model selection -- the standard MSTLS wrapper -- so flat gets a fair,
-tuned support rather than one fixed by an arbitrary threshold. Its
-target-independent pseudoinverse is cached once and reused across the D
-equations and the whole sweep, mirroring TT-WSINDy reusing its TT_PI_factors,
-so the walltime comparison is apples-to-apples.
-
-Three figures are produced:
-  * results/walltime_vs_D.png  -- walltime (s) vs D, log-scale, three methods.
-  * results/support_vs_D.png   -- support/coefficient/simulation error vs D, four
-      panels: (A) % of true terms discovered [recall], (B) mean number of spurious
-      terms per equation, (C) mean relative L2 coefficient error vs the true
-      coefficients, (D) relative forward-simulation error ||Xhat - X*||_F/||X*||_F
-      from the true initial condition, over a short horizon t in [0, FSIM_HORIZON]
-      (short because Lorenz-96 chaos saturates the full-window error ~0.9 even for
-      the true model). Needs the models re-run -> results/fsim_error_vs_D.txt.
-  * results/support_reduction_vs_D.png -- TT-WSINDy support-size funnel: for
-      each D one line connects the full library (D*2^D), the coarse product-
-      support summed over the D equations, and the fine MSTLS support.
-
-Lorenz-96 (F=8):  dx_i/dt = (x_{i+1} - x_{i-2}) x_{i-1} - x_i + F.
-True support per equation = {1, x_i, x_{i-1}x_{i+1}, x_{i-1}x_{i-2}}, all of
-which lie in the {1, x} tensor-product library (squarefree monomials), so exact
-recovery is achievable by every method.
-
-D = 4..13, M = 3000, t in [0, 30], test-function radius fraction r_frac = 1/80.
-(All of D=4..13 are computed and retained in the saved data files, but the figures
-display only D=6..12 via PLOT_EXCLUDE: D=4,5 recover incorrect support at small
-J^D -- a loss-tuning artifact, not a paper concern -- and D=13's flat walltime is
-noisy/expensive.)
-This (M, tM, r_frac) is chosen so that TT-WSINDy recovers the exact support at
-D <= 9 for both eps: a longer / narrower test function (r_frac = 1/80 vs 1/40)
-sharpens the weak form enough for the coarse pass to keep the weak -x_i
-self-term (cf. the coarse-selection limit). Flat WSINDy is not required to be
-clean at D <= 9.
-
-Every datapoint is the MEAN over NUM_TRIALS independent trials (distinct
-Lorenz-96 trajectories drawn from different initial-condition seeds). The saved
-data file stores both the per-datapoint mean and standard deviation across
-trials, and the figures show error bars (+-1 sd). Run from experiments/ with the
-scikit_tt env:
-    python walltime_support_vs_D.py
+Sampling is at a fixed step DT for every D; what varies with D is M, the number
+of time points (M_SCHEDULE), so a higher-dimensional system is given a longer
+trajectory rather than a finer one. The test-function radius is pinned at
+10*DT = 1 time unit throughout (R_FRAC = 10/M), so phi is the same physical
+width at every D. Any dimension whose trials do not all recover the full true
+support is rerun from scratch at a larger M -- see M_ESCALATION.
 """
 import os, sys, itertools
 sys.path.insert(0, '.')
@@ -75,10 +25,24 @@ from wsindy import wsindy   # original WSINDy-folder sparsifier (sparsifyDynamic
 # ------------------------------- problem setup -------------------------------
 F = 8.0                     # Lorenz-96 forcing
 C = 1.0                     # linear damping coefficient (-C x_i term)
-t0, tM = 0.0, 30.0          # time sampling range
-M = 3000                    # number of time points
-D_MIN, D_MAX = 4, 13        # dimension scan (inclusive)
+t0 = 0.0                    # sampling starts here
+DT = 0.1                    # sampling step, FIXED across the scan
+M = 3000                    # number of time points -- set per D by set_sampling()
+tM = t0 + DT*M              # so the window LENGTHENS with M, it does not refine
+D_MIN, D_MAX = 4, 12        # dimension scan (inclusive)
 NUM_TRIALS = 5              # trials averaged per datapoint (distinct IC seeds)
+
+# Per-D number of time points. The candidate library has J^D = 2^D columns per
+# equation, so identifiability needs more data as D grows; D not listed here
+# uses M_DEFAULT. A dimension whose 5 trials do not all recover the full true
+# support is rerun from scratch at M *= M_ESCALATION (D=4,5 excepted: their
+# misses are the known coarse-pass loss artifact at small J^D, which more data
+# does not fix).
+M_DEFAULT = 3000
+M_SCHEDULE = {9: 5000, 10: 10000, 11: 10000, 12: 20000}
+M_ESCALATION = 1.5
+MAX_ESCALATIONS = 3
+RECOVERY_EXEMPT = {4, 5}
 PLOT_EXCLUDE = {4, 5, 13}   # kept in the data files, omitted from the figures:
                             # D=4,5 recover incorrect support (a coarse-pass loss-
                             # tuning artifact at small J^D, not a paper concern);
@@ -88,18 +52,29 @@ PLOT_EXCLUDE = {4, 5, 13}   # kept in the data files, omitted from the figures:
 f = [lambda x: 1.0, lambda x: x]
 J = len(f)
 
-R_FRAC, DEGREE = 1/80, 16   # piecewise-polynomial test function (radius, degree)
-EPS16, EPS10 = 1e-16, 1e-10 # TT-PI SVD truncation tolerances to compare
+R_FRAC, DEGREE = 10/M, 16    # piecewise-polynomial test function (radius, degree);
+                             # R_FRAC = 10/M keeps the radius at (tM-t0)*R_FRAC
+                             # = 10*DT = 1 time unit for every M in the scan
+EPS16, EPS300 = 1e-16, 1e-300  # TT-PI SVD truncation tolerances to compare
 
 TTlambs   = np.linspace(1e-5, 5e-1, 10)   # coarse TT-MSTLS thresholds
 flatlambs = np.linspace(1e-5, 1e-1, 10)   # fine matrix-MSTLS thresholds (TT side)
 FLAT_LDS  = np.logspace(-4, -0.5, 12)     # STLS thresholds swept for flat WSINDy
-FSIM_HORIZON = 10.0          # forward-sim error is measured over t in [t0, t0+5]:
-                            # a short horizon separates model quality BEFORE
-                            # Lorenz-96 chaos decorrelates trajectories (over the
-                            # full [0,30] window even the true model errs ~0.9)
-FSIM_CAP  = 10.0            # per-trial forward-sim rel. error is capped here
-                            # (a diverged/blown-up integration is recorded as CAP)
+
+
+def set_sampling(D, M_override=None):
+    """Point the sampling globals at this D's time grid.
+
+    M comes from M_SCHEDULE (or M_override, when a dimension is being rerun at a
+    larger M). The step stays DT and the test-function radius stays 10*DT = 1
+    time unit, so a larger M buys a LONGER trajectory -- more of the attractor --
+    rather than a finer grid or a wider phi. Returns the M it set.
+    """
+    global M, tM, R_FRAC
+    M = int(M_override if M_override is not None else M_SCHEDULE.get(D, M_DEFAULT))
+    tM = t0 + DT*M
+    R_FRAC = 10.0/M
+    return M
 
 
 def l96_data(D, seed=0, burn=20.0):
@@ -168,71 +143,6 @@ def coeff_error(W, supps, fmaps, D, true):
     return 100.0*np.mean(errs)
 
 
-def build_model(supps, fmaps, W, D):
-    """
-    Reconstruct the recovered model as a list of per-equation dicts
-    {power-tuple: coefficient} (same reconstruction coeff_error uses). Each
-    power-tuple is the {1,x} exponent vector over the D states, so a term is the
-    squarefree monomial prod_{dim: power==1} x[dim].
-    """
-    model = []
-    for d in range(D):
-        md = {}
-        if supps[d] is not None:
-            for i, k in enumerate(supps[d]):
-                md[tuple(int(p) for p in fmaps[d][k])] = float(W[d][i])
-        model.append(md)
-    return model
-
-
-def forward_sim_error(model, X_true, D):
-    """
-    Relative forward-simulation error ||Xhat - X*||_F / ||X*||_F over a SHORT
-    horizon t in [t0, t0+FSIM_HORIZON].
-
-    The recovered `model` (per-equation monomial dicts from build_model) is
-    integrated from the TRUE initial condition X*[:, 0] on the data's time grid,
-    restricted to the first FSIM_HORIZON time units, giving Xhat; the error is
-    taken against X* over that same window. The short horizon is deliberate:
-    Lorenz-96 is chaotic, so over the full [0,30] window even the exact true model
-    decorrelates to rel-err ~0.9; measuring before decorrelation makes the metric
-    reflect model quality. Non-finite / blown-up integrations are recorded as
-    FSIM_CAP. Each equation is evaluated vectorized:
-    dx_d = coeffs_d . prod_dim( x^E_d ), with E_d the 0/1 exponent matrix.
-    """
-    coeffs, Emats = [], []
-    for d in range(D):
-        if model[d]:
-            ks = list(model[d].keys())
-            coeffs.append(np.array([model[d][k] for k in ks], float))
-            Emats.append(np.asarray(ks, float))          # (n_terms, D), entries 0/1
-        else:
-            coeffs.append(np.zeros(0)); Emats.append(np.zeros((0, D)))
-
-    def rhs(x, t):
-        dx = np.empty(D)
-        for d in range(D):
-            if coeffs[d].size:
-                mon = np.prod(np.where(Emats[d] != 0, x[None, :], 1.0), axis=1)
-                dx[d] = coeffs[d] @ mon
-            else:
-                dx[d] = 0.0
-        return dx
-
-    full = np.linspace(t0, tM, M)
-    k = max(int(np.searchsorted(full, t0 + FSIM_HORIZON, side='right')), 2)
-    tgrid, Xstar = full[:k], X_true[:, :k]               # short-horizon window
-    with np.errstate(over='ignore', invalid='ignore'):
-        try:
-            Xhat = odeint(rhs, X_true[:, 0], tgrid, rtol=1e-8, atol=1e-10,
-                          mxstep=10000).T                 # (D, k)
-        except Exception:
-            return FSIM_CAP
-    den = np.linalg.norm(Xstar) or 1.0
-    err = np.linalg.norm(Xhat - Xstar) / den
-    return FSIM_CAP if not np.isfinite(err) else min(err, FSIM_CAP)
-
-
 def run_flat(X, D):
     """
     Flat WSINDy on the full J^D tensor-product library, sparsified by the
@@ -252,11 +162,12 @@ def run_flat(X, D):
         for d in range(D):
             G[k] *= basis[tup[d], d]
     Gc = correlate(G, np.expand_dims(phi, 0), mode='valid').T           # (Mp, J^D)
+    del G                          # (J^D, M) is dead once convolved; free it
     Y = -1*correlate(X, np.expand_dims(dphi, 0), mode='valid').T        # (Mp, D)
 
     # L2-normalize columns (wsindy scaled_theta=2) so thresholding is scale-free
     M_diag = np.linalg.norm(Gc, 2, 0); M_diag[M_diag == 0] = 1.0
-    Gn = Gc / M_diag
+    Gc /= M_diag; Gn = Gc          # in place: Gc is not needed unnormalized
     Gn_pinv = np.linalg.pinv(Gn)                                        # cache once, reuse
 
     supps, Ws = [], []
@@ -308,194 +219,62 @@ def tt_support_sizes(supp, coarse_supps, D):
     return initial, coarse, fine
 
 
-if __name__ == '__main__':
-    os.makedirs('results', exist_ok=True)
-    recompute = False
-    # D values recomputed even if already cached (their old rows are overwritten;
-    # every other D on disk is left untouched). Empty set => pure incremental.
-    FORCE_RECOMPUTE = set()
-    DATA = 'results/walltime_support_vs_D.txt'
-    SIZES = 'results/support_sizes_vs_D.txt'
-    # 12 per-datapoint metrics; the data file stores mean then sd (over trials).
-    METRICS = ["t_TT16", "t_TT10", "t_flat",
-               "recall_TT16", "recall_TT10", "recall_flat",
-               "spur_TT16", "spur_TT10", "spur_flat",
-               "cerr_TT16", "cerr_TT10", "cerr_flat"]
-    HEADER = (f"mean(cols 1..12) then sd(cols 13..24) over {NUM_TRIALS} trials\n"
-              "D  " + " ".join(METRICS) + "  "
-              + " ".join(m + "_sd" for m in METRICS))
-    SIZES_HEADER = ("mean over %d trials (TT-WSINDy eps=1e-16)\n"
-                    "D initial coarse fine coarse_sd fine_sd" % NUM_TRIALS)
+def make_figures(rows, sizes_rows):
+    """Draw the figures from already-computed rows.
 
-    Ds = list(range(D_MIN, D_MAX + 1))
+    Kept separate from the sweep so the figures can be redrawn from the
+    saved data files without recomputing anything (see
+    plot_walltime_support_vs_D.py).
 
-    # ---- load any existing results so we never recompute or delete them ----
-    # Rows are keyed by D; only D values NOT already present get computed, and
-    # every D already on disk (including D=13) is preserved on save.
-    def _load_by_D(path):
-        by_D = {}
-        if os.path.exists(path):
-            old = np.loadtxt(path)
-            if old.ndim == 1:
-                old = old[None, :]
-            for r in old:
-                by_D[int(r[0])] = r
-        return by_D
+    Parameters
+    ----------
+    rows : ndarray (n_D, 26)
+        Main metrics, one row per D: [D, 12 means, 12 sds, M].
+    sizes_rows : array-like (n_D, 7)
+        Support-size funnel rows: [D, initial, coarse, fine, coarse_sd,
+        fine_sd, M].
 
-    data_by_D  = _load_by_D(DATA)
-    sizes_by_D = _load_by_D(SIZES)
-
-    if recompute:
-        for D in Ds:
-            if D in data_by_D and D in sizes_by_D and D not in FORCE_RECOMPUTE:
-                print(f"\n=== D={D}: using cached data (not recomputed) ===",
-                      flush=True)
-                continue
-            true = l96_true(D)
-            print(f"\n=== D={D}  (J^D={J**D} candidates/eqn, M={M}, "
-                  f"{NUM_TRIALS} trials) ===", flush=True)
-
-            trials = []            # per-trial [12 metrics]
-            size_trials = []       # per-trial [initial, coarse, fine]
-            for trial in range(NUM_TRIALS):
-                X = l96_data(D, seed=trial)   # distinct trajectory per trial
-
-                t16, s16, fm16, W16, cs16 = run_tt(X, D, EPS16)
-                r16, sp16 = support_error(s16, fm16, D, true)
-                ce16 = coeff_error(W16, s16, fm16, D, true)
-
-                t10, s10, fm10, W10, _ = run_tt(X, D, EPS10)
-                r10, sp10 = support_error(s10, fm10, D, true)
-                ce10 = coeff_error(W10, s10, fm10, D, true)
-
-                tf, sf, fmf, Wf = run_flat(X, D)
-                rf, spf = support_error(sf, fmf, D, true)
-                cef = coeff_error(Wf, sf, fmf, D, true)
-
-                trials.append([t16, t10, tf, r16, r10, rf,
-                               sp16, sp10, spf, ce16, ce10, cef])
-                # support-reduction funnel reuses the eps=1e-16 run above
-                size_trials.append(tt_support_sizes(s16, cs16, D))
-                print(f"  trial {trial+1}/{NUM_TRIALS}:  "
-                      f"TT16 {t16:6.1f}s r={r16:5.1f}% sp={sp16:5.2f} ce={ce16:6.2f}% | "
-                      f"TT10 {t10:6.1f}s r={r10:5.1f}% | "
-                      f"flat {tf:7.1f}s r={rf:5.1f}% sp={spf:8.2f} ce={cef:6.2f}%",
-                      flush=True)
-
-            trials = np.array(trials, float)
-            mean, sd = trials.mean(0), trials.std(0)
-            print(f"  --> mean over {NUM_TRIALS}: "
-                  f"TT16 {mean[0]:6.1f}s r={mean[3]:5.1f}% sp={mean[6]:5.2f} ce={mean[9]:6.2f}% | "
-                  f"flat {mean[2]:7.1f}s r={mean[5]:5.1f}% sp={mean[8]:8.2f} ce={mean[11]:6.2f}%",
-                  flush=True)
-
-            size_trials = np.array(size_trials, float)
-            smean, ssd = size_trials.mean(0), size_trials.std(0)
-
-            # record, then save the FULL merged set (sorted by D) so no data is lost
-            data_by_D[D]  = np.array([D, *mean, *sd], float)
-            sizes_by_D[D] = np.array([D, smean[0], smean[1], smean[2],
-                                      ssd[1], ssd[2]], float)
-            np.savetxt(DATA, np.array([data_by_D[d] for d in sorted(data_by_D)],
-                                      float), header=HEADER, fmt="%.6g")
-            np.savetxt(SIZES, np.array([sizes_by_D[d] for d in sorted(sizes_by_D)],
-                                       float), header=SIZES_HEADER, fmt="%.6g")
-
-    # full data set (all D on disk, incl. D=13), sorted by D
-    rows = np.array([data_by_D[d] for d in sorted(data_by_D)], float)
-
-    # ---- forward-simulation error (separate incremental cache) ----
-    # Relative ||Xhat - X*||_F / ||X*||_F, integrating each recovered model from
-    # the TRUE initial condition. This needs the actual models (support+coeffs),
-    # which the main data file does NOT store, so it RE-RUNS run_tt(eps16) and
-    # run_flat per D/trial (deterministic in the seed). Own file; the main data and
-    # its cache are untouched. Computed only for the plotted D (skips PLOT_EXCLUDE,
-    # i.e. the expensive/omitted D=13 and the low-D artifacts D=4,5).
-    DATA_FSIM = 'results/fsim_error_vs_D.txt'
-    FSIM_HEADER = (f"forward-sim rel. error over t in [0,{FSIM_HORIZON:g}]: "
-                   f"mean(cols 1..2) then sd(cols 3..4) over {NUM_TRIALS} trials, "
-                   f"capped at {FSIM_CAP}\n"
-                   "D  fsim_TT16 fsim_flat  fsim_TT16_sd fsim_flat_sd")
-    fsim_by_D = _load_by_D(DATA_FSIM)
-    if recompute:
-        for D in Ds:
-            if D in PLOT_EXCLUDE:
-                continue
-            if D in fsim_by_D and D not in FORCE_RECOMPUTE:
-                print(f"\n=== [fsim] D={D}: using cached data ===", flush=True)
-                continue
-            print(f"\n=== [fsim] D={D}  ({NUM_TRIALS} trials, re-running models) ===",
-                  flush=True)
-            tr = []
-            for trial in range(NUM_TRIALS):
-                X = l96_data(D, seed=trial)
-                _, s16, fm16, W16, _ = run_tt(X, D, EPS16)
-                e16 = forward_sim_error(build_model(s16, fm16, W16, D), X, D)
-                _, sf, fmf, Wf = run_flat(X, D)
-                efl = forward_sim_error(build_model(sf, fmf, Wf, D), X, D)
-                tr.append([e16, efl])
-                print(f"  trial {trial+1}/{NUM_TRIALS}: fsim  TT16={e16:.3f}  "
-                      f"flat={efl:.3f}", flush=True)
-            tr = np.array(tr, float)
-            fsim_by_D[D] = np.array([D, tr[:, 0].mean(), tr[:, 1].mean(),
-                                     tr[:, 0].std(), tr[:, 1].std()], float)
-            np.savetxt(DATA_FSIM, np.array([fsim_by_D[d] for d in sorted(fsim_by_D)],
-                                           float), header=FSIM_HEADER, fmt="%.6g")
-
+    Which D are drawn is set by PLOT_EXCLUDE, not by this function.
+    """
     # ---- plotting subset: include D=6, omit PLOT_EXCLUDE (D=13) ----
     prows = rows[np.array([int(d) not in PLOT_EXCLUDE for d in rows[:, 0]])]
     Ds  = prows[:, 0]
-    t16, t10, tf = prows[:, 1], prows[:, 2], prows[:, 3]
-    r16, r10, rf = prows[:, 4], prows[:, 5], prows[:, 6]
-    sp16, sp10, spf = prows[:, 7], prows[:, 8], prows[:, 9]
-    ce16, ce10, cef = prows[:, 10], prows[:, 11], prows[:, 12]
+    t16, t300, tf = prows[:, 1], prows[:, 2], prows[:, 3]
+    r16, r300, rf = prows[:, 4], prows[:, 5], prows[:, 6]
+    sp16, sp300, spf = prows[:, 7], prows[:, 8], prows[:, 9]
+    ce16, ce300, cef = prows[:, 10], prows[:, 11], prows[:, 12]
     # standard deviations (columns 13..24), same metric order
-    e_t16, e_t10, e_tf = prows[:, 13], prows[:, 14], prows[:, 15]
-    e_r16, e_r10, e_rf = prows[:, 16], prows[:, 17], prows[:, 18]
-    e_sp16, e_sp10, e_spf = prows[:, 19], prows[:, 20], prows[:, 21]
-    e_ce16, e_ce10, e_cef = prows[:, 22], prows[:, 23], prows[:, 24]
-
-    # forward-sim error plot subset (cols: D, mean[TT16,flat], sd[TT16,flat]);
-    # empty until computed
-    if fsim_by_D:
-        frows = np.array([fsim_by_D[d] for d in sorted(fsim_by_D)], float)
-        frows = frows[np.array([int(d) not in PLOT_EXCLUDE for d in frows[:, 0]])]
-    else:
-        frows = np.empty((0, 5))
+    e_t16, e_t300, e_tf = prows[:, 13], prows[:, 14], prows[:, 15]
+    e_r16, e_r300, e_rf = prows[:, 16], prows[:, 17], prows[:, 18]
+    e_sp16, e_sp300, e_spf = prows[:, 19], prows[:, 20], prows[:, 21]
+    e_ce16, e_ce300, e_cef = prows[:, 22], prows[:, 23], prows[:, 24]
 
     # --------------------------- Figure 1: walltime --------------------------
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.set_yscale('log')
     ax.errorbar(Ds, t16, yerr=e_t16, fmt='o-', color='C0', capsize=3,
                 label=r'TT-WSINDy ($\epsilon=10^{-16}$)')
-    #ax.errorbar(Ds, t10, yerr=e_t10, fmt='s-', color='C2', capsize=3,
-    #            label=r'one-pass TT-WSINDy ($\epsilon=10^{-10}$)')
+    ax.errorbar(Ds, t300, yerr=e_t300, fmt='s-', color='C2', capsize=3,
+                label=r'TT-WSINDy ($\epsilon=10^{-300}$)')
     ax.errorbar(Ds, tf, yerr=e_tf, fmt='^-', color='C3', capsize=3,
                 label='flat WSINDy')
     ax.set_xlabel('number of dimensions $D$')
     ax.set_ylabel('walltime (s)')
-    ax.set_title(f'Walltime vs $D$  (Lorenz 96, $M={M}$, $t\\in[{t0:.0f},{tM:.0f}]$)')
+    ax.set_title(rf'Walltime vs $D$  (Lorenz 96, $\Delta t={DT}$, $M$ set per $D$)')
     ax.grid(True, which='both', ls=':', alpha=0.5)
     ax.legend()
     plt.tight_layout()
     plt.savefig('results/walltime_vs_D.png', dpi=150)
     print("\nsaved results/walltime_vs_D.png")
 
-    # ------- Figure 2: support, coefficient error & forward-sim error --------
-    layout = """
-        AB
-        CD
-    """
-    fig, ax_dict = plt.subplot_mosaic(layout, figsize=(14, 11))
-    axL = ax_dict['A']
-    axM = ax_dict['B']
-    axR = ax_dict['C']
-    axS = ax_dict['D']
+    # ----------- Figure 2: support & coefficient error vs D ------------
+    fig, (axL, axM, axR) = plt.subplots(1, 3, figsize=(19, 5.5))
 
     style = [(r'TT-WSINDy ($\epsilon=10^{-16}$)', 'o-', 'C0'),
+             (r'TT-WSINDy ($\epsilon=10^{-300}$)', 's-', 'C2'),
              ('flat WSINDy', '^-', 'C3')]
 
-    for (lab, mk, col), y, e in zip(style, (r16, rf), (e_r16, e_rf)):
+    for (lab, mk, col), y, e in zip(style, (r16, r300, rf), (e_r16, e_r300, e_rf)):
         axL.errorbar(Ds, y, yerr=e, fmt=mk, color=col, capsize=3, label=lab)
     axL.set_xlabel('number of dimensions $D$')
     axL.set_ylabel('% of true terms discovered')
@@ -504,7 +283,8 @@ if __name__ == '__main__':
     axL.grid(True, ls=':', alpha=0.5)
     axL.legend()
 
-    for (lab, mk, col), y, e in zip(style, (sp16, spf), (e_sp16, e_spf)):
+    for (lab, mk, col), y, e in zip(style, (sp16, sp300, spf),
+                                    (e_sp16, e_sp300, e_spf)):
         axM.errorbar(Ds, y, yerr=e, fmt=mk, color=col, capsize=3, label=lab)
     axM.set_yscale('symlog', linthresh=1.0)   # TT ~O(1), flat ~O(10^3): show both
     axM.set_xlabel('number of dimensions $D$')
@@ -514,7 +294,8 @@ if __name__ == '__main__':
     axM.grid(True, which='both', ls=':', alpha=0.5)
     axM.legend()
 
-    for (lab, mk, col), y, e in zip(style, (ce16, cef), (e_ce16, e_cef)):
+    for (lab, mk, col), y, e in zip(style, (ce16, ce300, cef),
+                                    (e_ce16, e_ce300, e_cef)):
         axR.errorbar(Ds, y, yerr=e, fmt=mk, color=col, capsize=3, label=lab)
     #axR.set_yscale('log')                      # spans clean (~0.1%) to failed (~100%+)
     axR.set_xlabel('number of dimensions $D$')
@@ -523,36 +304,73 @@ if __name__ == '__main__':
     axR.grid(True, which='both', ls=':', alpha=0.5)
     axR.legend()
 
-    # 4th panel: relative forward-simulation error from the true initial condition
-    fs_style = [(r'TT-WSINDy ($\epsilon=10^{-16}$)', 'o-', 'C0', 1, 3),
-                ('flat WSINDy', '^-', 'C3', 2, 4)]
-    if frows.size:
-        axS.set_yscale('log')                          # spans ~1e-3 (clean) to CAP
-        floor = 2e-3                                   # below the clean-recovery level
-        for lab, mk, colr, mi, si in fs_style:
-            m, s = frows[:, mi], frows[:, si]
-            # upper whisker = full sd; lower whisker bounded to one decade so a
-            # bimodal sd>mean point (flat blows up in only some trials) does not
-            # draw a bar spanning the whole log axis (true sd is in the data file)
-            lo = np.minimum(s, 0.9*m)
-            axS.errorbar(frows[:, 0], m, yerr=[lo, s], fmt=mk, color=colr,
-                         capsize=3, label=lab)
-        axS.axhline(FSIM_CAP, color='0.6', ls=':', lw=1)      # blow-up cap
-        axS.set_ylim(floor, 1.6*FSIM_CAP)
-        axS.legend()
-    else:
-        axS.text(0.5, 0.5, 'forward-sim error not yet computed\n(set recompute=True)',
-                 ha='center', va='center', transform=axS.transAxes, color='0.5')
-    axS.set_xlabel('number of dimensions $D$')
-    axS.set_ylabel(r'relative fwd-sim error $\|\hat X - X^*\|_F/\|X^*\|_F$')
-    axS.set_title(f'Forward-simulation error (from true IC, $t\\in[0,{FSIM_HORIZON:g}]$)')
-    axS.grid(True, which='both', ls=':', alpha=0.5)
-
-    fig.suptitle(f'Support, coefficient & forward-sim error vs $D$  (Lorenz 96, '
+    fig.suptitle(f'Support & coefficient error vs $D$  (Lorenz 96, '
                  f'mean$\\pm$sd of {NUM_TRIALS} trials)')
     plt.tight_layout()
     plt.savefig('results/support_vs_D.png', dpi=150)
     print("saved results/support_vs_D.png")
+
+    # ------- Figure 2b: support recovery & coefficient error (2-panel story) -------
+    # Built entirely from the in-memory main-data rows (prows) -- no re-run. Two panels:
+    #   (a) support-recovery Jaccard index (a.k.a. true positivity ratio, TPR)
+    #       vs D: J(S,S*) = |S n S*| / |S u S*|, with 1.0 = exact support. It
+    #       penalizes BOTH missed true terms and spurious terms, so flat's ~J^D
+    #       false positives crater its J while TT stays close to the truth.
+    #   (b) mean relative l2 coefficient error vs truth: both pinned at the shared
+    #       weak-form floor while support is exact (low D), rising to a comparable
+    #       O(10-100%) band once recovery breaks down (high D).
+    #
+    # Jaccard from the aggregates (pooled / micro-averaged over the D
+    # equations -- the standard WSINDy TPR = TP/(TP+FP+FN)). With n_true true
+    # terms per equation, recall = 100*(true found)/(n_true*D) and `spur` = mean
+    # spurious per equation, so per equation (the D cancels):
+    #   |S n S*| = recall/100 * n_true,     |S u S*| = n_true + spur.
+    # Computed from the trial-MEAN recall/spur, so it is the pooled TPR of the
+    # mean support: exact wherever recovery is clean (J=1), and a close proxy for
+    # the per-trial mean elsewhere. (Exact per-trial J +- sd would need J stored
+    # during the sweep; omitted here to keep this a redraw of existing rows.)
+    n_true = len(l96_true(int(Ds[0]))[0])              # true terms per equation (= 4)
+    jac_tt = (r16/100.0*n_true) / (n_true + sp16)      # TT   support Jaccard / TPR
+    jac_tt300 = (r300/100.0*n_true) / (n_true + sp300)      # TT eps=1e-300
+    jac_fl = (rf/100.0*n_true) / (n_true + spf)        # flat support Jaccard / TPR
+
+    fig, (axP, axC) = plt.subplots(1, 2, figsize=(13.5, 5.4))
+
+    # (a) support recovery: Jaccard index / true positivity ratio
+    axP.axhline(1.0, color='0.5', ls='--', lw=1.2, zorder=1)
+    axP.plot(Ds, jac_fl, '^-', color='C3', lw=2, ms=8, label='flat WSINDy')
+    axP.plot(Ds, jac_tt, 'o-', color='C0', lw=2, ms=8,
+             label=r'TT-WSINDy ($\epsilon=10^{-16}$)')
+    axP.plot(Ds, jac_tt300, 's-', color='C2', lw=2, ms=8,
+             label=r'TT-WSINDy ($\epsilon=10^{-300}$)')
+    axP.set_ylim(-0.03, 1.07)
+    #axP.set_yscale('log')
+    axP.set_xlabel('number of dimensions $D$')
+    axP.set_ylabel(r'support Jaccard  $|S\cap S^*|/|S\cup S^*|$  (TPR)')
+    axP.set_title('(a) Support recovery (Jaccard / TPR)')
+    axP.grid(True, ls=':', alpha=0.5)
+    axP.legend(loc='upper right')
+
+    # (b) coefficient error vs truth
+    axC.errorbar(Ds, cef, yerr=e_cef, fmt='^-', color='C3', lw=2, ms=8,
+                 capsize=3, label='flat WSINDy')
+    axC.errorbar(Ds, ce16, yerr=e_ce16, fmt='o-', color='C0', lw=2, ms=8,
+                 capsize=3, label=r'TT-WSINDy ($\epsilon=10^{-16}$)')
+    axC.errorbar(Ds, ce300, yerr=e_ce300, fmt='s-', color='C2', lw=2, ms=8,
+                 capsize=3, label=r'TT-WSINDy ($\epsilon=10^{-300}$)')
+    #axC.set_yscale('log')
+    axC.set_xlabel('number of dimensions $D$')
+    axC.set_ylabel(r'mean relative $\ell_2$ coefficient error (%)')
+    axC.set_title('(b) Coefficient error vs truth')
+    axC.grid(True, which='both', ls=':', alpha=0.5)
+    axC.legend(loc='center left')
+
+    fig.suptitle('TT-WSINDy vs flat WSINDy: comparable accuracy, very different '
+                 f'support recovery  (Lorenz-96, {NUM_TRIALS} trials)',
+                 fontsize=12)
+    plt.tight_layout()
+    plt.savefig('results/jaccard_coeff_vs_D.png', dpi=150)
+    print("saved results/jaccard_coeff_vs_D.png")
 
     # ------- Figure 3: TT-WSINDy support reduction (initial -> coarse -> fine) -------
     # TT-WSINDy only (no flat). For each D, one line connects the full candidate
@@ -561,7 +379,7 @@ if __name__ == '__main__':
     # the library before the fine solve. Computed alongside the main sweep (from
     # the same eps=1e-16 trials) and stored as trial means; coarse/fine carry a
     # +-1 sd error bar (initial is deterministic).
-    srows = np.array([sizes_by_D[d] for d in sorted(sizes_by_D)], float)
+    srows = np.array(sizes_rows, float)
     srows = srows[np.array([int(d) not in PLOT_EXCLUDE for d in srows[:, 0]])]
     s_init, s_coarse, s_fine = srows[:, 1], srows[:, 2], srows[:, 3]
     s_coarse_sd, s_fine_sd = srows[:, 4], srows[:, 5]
@@ -584,3 +402,106 @@ if __name__ == '__main__':
     plt.tight_layout()
     plt.savefig('results/support_reduction_vs_D.png', dpi=150)
     print("saved results/support_reduction_vs_D.png")
+
+
+if __name__ == '__main__':
+    os.makedirs('results', exist_ok=True)
+    # Every run recomputes every D in the scan and overwrites the result
+    # files; nothing is read back from disk, so the outputs always describe
+    # one run at one set of hyperparameters (M aside, which is per-D and is
+    # recorded in the last column of both files).
+    DATA = 'results/walltime_support_vs_D.txt'
+    SIZES = 'results/support_sizes_vs_D.txt'
+    # 12 per-datapoint metrics; the data file stores mean then sd (over trials).
+    METRICS = ["t_TT16", "t_TT300", "t_flat",
+               "recall_TT16", "recall_TT300", "recall_flat",
+               "spur_TT16", "spur_TT300", "spur_flat",
+               "cerr_TT16", "cerr_TT300", "cerr_flat"]
+    HEADER = (f"mean(cols 1..12) then sd(cols 13..24) over {NUM_TRIALS} trials; "
+              f"dt={DT}, last col = M used at that D\n"
+              "D  " + " ".join(METRICS) + "  "
+              + " ".join(m + "_sd" for m in METRICS) + "  M")
+    SIZES_HEADER = ("mean over %d trials (TT-WSINDy eps=1e-16); last col = M\n"
+                    "D initial coarse fine coarse_sd fine_sd M" % NUM_TRIALS)
+
+    Ds = list(range(D_MIN, D_MAX + 1))
+
+    data_rows = []            # one row per D, in scan order
+    sizes_rows = []
+
+    for D in Ds:
+        true = l96_true(D)
+        M_D, escalations = set_sampling(D), 0
+
+        while True:
+            print(f"\n=== D={D}  (J^D={J**D} candidates/eqn, M={M_D}, "
+                  f"t in [{t0:g},{tM:g}], dt={DT}, {NUM_TRIALS} trials) ===",
+                  flush=True)
+
+            trials = []            # per-trial [12 metrics]
+            size_trials = []       # per-trial [initial, coarse, fine]
+            for trial in range(NUM_TRIALS):
+                X = l96_data(D, seed=trial)   # distinct trajectory per trial
+
+                t16, s16, fm16, W16, cs16 = run_tt(X, D, EPS16)
+                r16, sp16 = support_error(s16, fm16, D, true)
+                ce16 = coeff_error(W16, s16, fm16, D, true)
+
+                t300, s300, fm300, W300, _ = run_tt(X, D, EPS300)
+                r300, sp300 = support_error(s300, fm300, D, true)
+                ce300 = coeff_error(W300, s300, fm300, D, true)
+
+                tf, sf, fmf, Wf = run_flat(X, D)
+                rf, spf = support_error(sf, fmf, D, true)
+                cef = coeff_error(Wf, sf, fmf, D, true)
+
+                trials.append([t16, t300, tf, r16, r300, rf,
+                               sp16, sp300, spf, ce16, ce300, cef])
+                # support-reduction funnel reuses the eps=1e-16 run above
+                size_trials.append(tt_support_sizes(s16, cs16, D))
+                print(f"  trial {trial+1}/{NUM_TRIALS}:  "
+                      f"TT16 {t16:6.1f}s r={r16:5.1f}% sp={sp16:5.2f} ce={ce16:6.2f}% | "
+                      f"TT300 {t300:6.1f}s r={r300:5.1f}% | "
+                      f"flat {tf:7.1f}s r={rf:5.1f}% sp={spf:8.2f} ce={cef:6.2f}%",
+                      flush=True)
+
+            trials = np.array(trials, float)
+            # every trial must find every true term (both TT tolerances) for
+            # this D's M to stand; D=4,5 are exempt (see M_SCHEDULE comment)
+            missed = float(min(trials[:, 3].min(), trials[:, 4].min()))
+            if D in RECOVERY_EXEMPT or missed >= 100.0:
+                break
+            if escalations >= MAX_ESCALATIONS:
+                print(f"  !! D={D}: still only {missed:.1f}% recall at M={M_D} "
+                      f"after {escalations} escalations -- keeping this row",
+                      flush=True)
+                break
+            escalations += 1
+            M_D = set_sampling(D, int(round(M_D*M_ESCALATION/1000.0))*1000)
+            print(f"  !! D={D}: a trial recovered only {missed:.1f}% of the true "
+                  f"terms -- rerunning all {NUM_TRIALS} trials at M={M_D}",
+                  flush=True)
+
+        mean, sd = trials.mean(0), trials.std(0)
+        print(f"  --> mean over {NUM_TRIALS} (M={M_D}): "
+              f"TT16 {mean[0]:6.1f}s r={mean[3]:5.1f}% sp={mean[6]:5.2f} ce={mean[9]:6.2f}% | "
+              f"flat {mean[2]:7.1f}s r={mean[5]:5.1f}% sp={mean[8]:8.2f} ce={mean[11]:6.2f}%",
+              flush=True)
+
+        size_trials = np.array(size_trials, float)
+        smean, ssd = size_trials.mean(0), size_trials.std(0)
+
+        # record, then rewrite this run's rows so far, so a long scan is not
+        # lost if it is interrupted (no previous run is merged in)
+        data_rows.append(np.array([D, *mean, *sd, M_D], float))
+        sizes_rows.append(np.array([D, smean[0], smean[1], smean[2],
+                                    ssd[1], ssd[2], M_D], float))
+        np.savetxt(DATA, np.array(data_rows, float),
+                   header=HEADER, fmt="%.6g")
+        np.savetxt(SIZES, np.array(sizes_rows, float),
+                   header=SIZES_HEADER, fmt="%.6g")
+
+    # this run's full data set, in scan order
+    rows = np.array(data_rows, float)
+
+    make_figures(rows, sizes_rows)

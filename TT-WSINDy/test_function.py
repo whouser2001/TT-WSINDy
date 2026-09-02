@@ -1,7 +1,14 @@
 """
-Utils for the weak form. 
+Utils to construct the piecewise polynomial test function.
+For more information, see [1].
 
-TODO: cite April's paper.
+References
+----------
+.. [1] A. Tran and D. M. Bortz, "Weak Form Scientific Machine
+        Learning: Test Function Construction for System
+        Identification", SIAM Journal on Scientific Computing,
+        48 (2026), pp. C890-C915,
+        https://doi.org/10.1137/25M1776020
 """
 import numpy as np
 from scipy.special import binom
@@ -10,8 +17,6 @@ def C2_pp(r,p):
     """
     2-norm normalizing constant of the piecewise
     polynomial test function
-
-    TODO: cite April's paper
     """
     s = 0
     for k in range(0,2*p+1):
