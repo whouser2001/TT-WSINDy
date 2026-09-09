@@ -1,20 +1,5 @@
 """
-Rank truncation demonstration.
-
-Compares the two feature-tensor constructions -- the original dense build and
-the low-rank left-to-right SVD sweep (low_rank=True) -- at matched accuracy:
-both arms are compressed with the same eps, set nonzero only so scikit-tt takes
-the compressed path but far below any nonzero relative singular value, so
-nothing is ever truncated and the two arms return the same tensor.
-
-Sampling follows the walltime_support_vs_D regime rather than a fixed time
-window: the step is a fixed DT and the test-function radius is pinned at
-TAPS*DT = 0.5 time units (r_frac = TAPS/M), so a larger M buys a LONGER
-trajectory -- more of the attractor -- rather than a finer grid or a wider phi.
-That is what makes the true support recoverable at every D in the scan, D=9
-included; the earlier fixed-window regime (tM=30, r_frac=1/40, no burn-in) gave
-phi a 250-tap support at M=10000 and only 30 time units of attractor, and the
-coarse pass could not prune to the true product support at high D.
+Low-rank feature tensor construction vs. the original, full construction
 """
 import os, sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -27,33 +12,32 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
 from scipy.integrate import odeint
 from ttwsindy import TT_WSINDy
+import exputils as xu
 
 # ------------- model -------------
 F = 8.0                 # Lorenz-96 forcing
-C = 1.0                 # linear damping coefficient (-C x_i term)
+C = 1.0                 # linear damping coefficient
 
 def L96(x, t):
     """Lorenz 96 model with constant forcing F."""
     return (np.roll(x, -1) - np.roll(x, 2)) * np.roll(x, 1) - C*x + F
 
-f    = [lambda x: 1, lambda x: x]
-fstr = [lambda n: '', lambda n: f'x_{n}']
-if len(fstr) != len(f):
-    raise ValueError('fstr does not correspond to f')
+f      = [lambda x: 1, lambda x: x]
+LABELS = ['', 'x{}']          # one per library function, {} = dimension
+xu.check_labels(f, LABELS)
 
 # ------------- sampling / test function -------------
-T0     = 0.0            # sampling starts here
-DT     = 0.05           # sampling step, FIXED across both sweeps
+T0     = 0.0
+DT     = 0.05
 BURN   = 20.0           # integrated away before sampling, to land on the attractor
-TAPS   = 10             # test-function radius in samples: r_frac = TAPS/M, so
-                        # phi spans TAPS*DT = 0.5 time units at every M
-DEGREE = 16             # piecewise-polynomial test-function degree
+TAPS   = 10             # num points in test function radius
+DEGREE = 16             # test function degree
 
 TTlambs   = np.linspace(1e-5, 5e-1, 10)   # coarse TT-MSTLS thresholds
 flatlambs = np.linspace(1e-5, 1e-1, 10)   # fine matrix-MSTLS thresholds
 
-# nonzero (so scikit-tt takes the compressed path) but below any nonzero
-# relative singular value, so nothing is ever truncated. Shared by both arms.
+# sub machine-precision truncation parameter, so that scikit-tt
+# does a thin SVD but does not truncate singular values
 EPS = 1e-300
 
 # ------------- sweeps -------------
@@ -64,35 +48,14 @@ MS        = [500, 1000, 2000, 3000, 5000, 10000, 20000, 40000]
 D_FIXED   = 8
 
 DS        = [4, 5, 6, 7, 8, 9]
-# Measured: the exact product support is recovered at every D in DS at this M
-# (clean data, 10-tap phi) -- D=9 included, which is what this M was chosen for.
-# It also keeps the dense arm inside MEM_BUDGET_GB at D=9
-# (8*2*5000^2*8 = 3.0 GB), so both curves span the whole constant-M panel.
 M_FIXED   = 5000
 
+# so an error is not thrown when memory is exceeded
 MEM_BUDGET_GB = 10.5
 
 def fits_in_memory(D, M):
     gb = (D - 1) * len(f) * M * M * 8 / 2**30
     return gb <= MEM_BUDGET_GB
-
-def print_supp(fstr, supps, feature_maps):
-    D = len(supps)
-    for d1 in range(D):
-        supp = supps[d1]
-        feature_map = feature_maps[d1]
-        line = f"x_{d1 + 1}' : "
-        if supp is not None:
-            for k in supp:
-                substr = ''
-                for d2 in range(D):
-                    substr += fstr[feature_map[k][d2]](d2 + 1)
-                if substr == '':
-                    substr += '1'
-                line += substr
-                if k != supp[-1]:
-                    line += '  '
-        print(line)
 
 def simulate(D, M, seed=0):
     """Integrate Lorenz-96 to a D x M data matrix, sampled on the attractor.
@@ -138,7 +101,7 @@ def sweep(cases, nAvg, run_dense):
                 dense[k, i], supps, fmaps = time_ttwsindy(
                     X, t0, tM, r_frac, False, EPS)
             print('original discovered support:')
-            print_supp(fstr, supps, fmaps)
+            xu.print_supp(supps, fmaps, LABELS)
         else:
             print(f'Original construction skipped (needs '
                   f'{(D - 1) * len(f) * M * M * 8 / 2**30:.1f} GB of cores)')
@@ -147,7 +110,7 @@ def sweep(cases, nAvg, run_dense):
             lowrank[k, i], supps, fmaps = time_ttwsindy(
                 X, t0, tM, r_frac, True, EPS)
         print('low-rank discovered support:')
-        print_supp(fstr, supps, fmaps)
+        xu.print_supp(supps, fmaps, LABELS)
     return dense, lowrank
 
 def save_data(m_dense, m_low, d_dense, d_low):
@@ -167,7 +130,7 @@ def save_data(m_dense, m_low, d_dense, d_low):
     np.savetxt(DATA, combined, header=header)
 
 def load_data():
-    data = np.loadtxt(DATA).reshape(len(MS) + len(DS), -1)
+    data = xu.load_txt(DATA).reshape(len(MS) + len(DS), -1)
     nAvg = data.shape[1] // 2
     m, d = data[:len(MS)], data[len(MS):]
     return (m[:, :nAvg].mean(axis=1), m[:, nAvg:].mean(axis=1),

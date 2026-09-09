@@ -1,7 +1,7 @@
 """
 Weak form (TT-WSINDy) vs. strong form (MANDy) coefficient accuracy on L96.
 """
-import os, sys, itertools
+import os, sys
 sys.path.insert(0, '.')
 sys.path.insert(0, '../TT-WSINDy')
 import numpy as np
@@ -11,7 +11,7 @@ from scipy.signal import correlate
 from scipy.integrate import odeint
 from feature_tensor import feature_tensor
 from test_function import piecewise_polynomial
-import errorplot
+import exputils as xu
 
 F = 8
 def L96(x, t):
@@ -50,16 +50,8 @@ def true_coeffs(D, J, F):
         Ws.append(W)
     return Ws
 
-def tt_pi_coeffs(Theta, y, threshold, D, J):
-    """One TT-PI solve, returned as a dense (J,)*D tensor in original units.
-
-    TT_PI uses overwrite=False, so Theta is not mutated and no copy is needed.
-    """
-    W = Theta.TT_PI(y)
-    return np.asarray(W.full()).reshape((J,) * D)
-
 def weak_coefficients(X, f, t0, tM, D, J,
-                      r_frac=1.0 / 60.0, degree=16, threshold=1e-10):
+                      r_frac=1.0 / 60.0, degree=16):
     """TT-WSINDy (weak form) coefficient tensors, one row per output dim.
 
     L96 is first order, so one integration by parts moves the single derivative
@@ -77,10 +69,10 @@ def weak_coefficients(X, f, t0, tM, D, J,
     # the order-1 dphi equals phi', so -correlate(x, dphi) = -<x, phi'>
     Y = -1 * correlate(X, np.expand_dims(dphi, axis=0),
                        mode='valid').transpose()                # (Mp, D)
-    return np.stack([tt_pi_coeffs(Theta, Y[:, d], threshold, D, J)
+    return np.stack([xu.tt_pi_coeffs(Theta, Y[:, d], (J,) * D)
                      for d in range(D)])
 
-def strong_coefficients(X, f, dt, D, J, threshold=1e-10):
+def strong_coefficients(X, f, dt, D, J):
     """MANDy (strong form) coefficient tensors, one row per output dim.
 
     The LHS x' is a 3-point central finite difference of the trajectory; the
@@ -89,22 +81,8 @@ def strong_coefficients(X, f, dt, D, J, threshold=1e-10):
     """
     Xdot = (X[:, 2:] - X[:, :-2]) / (2 * dt)                # (D, M-2)
     Theta = feature_tensor(X[:, 1:-1], f, phi=None, low_rank=True)
-    return np.stack([tt_pi_coeffs(Theta, Xdot[d], threshold, D, J)
+    return np.stack([xu.tt_pi_coeffs(Theta, Xdot[d], (J,) * D)
                      for d in range(D)])
-
-def rel_err(W, Wtrue):
-    """Relative 2-norm error over the full stacked coefficient tensor."""
-    return np.linalg.norm(W - Wtrue) / np.linalg.norm(Wtrue)
-
-def _mono_label(idx):
-    """Readable label for a monomial multi-index, e.g. (1,2,0,0) -> 'x0 x1^2'."""
-    parts = []
-    for d, p in enumerate(idx):
-        if p == 1:
-            parts.append(f"x{d}")
-        elif p > 1:
-            parts.append(f"x{d}^{p}")
-    return "1" if not parts else " ".join(parts)
 
 # -----
 # main
@@ -116,97 +94,87 @@ if __name__ == '__main__':
     dt = 0.015
     r_frac = 1.0 / 120.0
     degree = 16
-    threshold = 1e-16
 
     noise_levels = np.array([1e-5, 1e-4, 1e-3, 1e-2, 5e-2, 1e-1, 2e-1, 4e-1])
     n_trials = 40
 
     f = [lambda x : 1, lambda x : x]
     J = len(f)
+    LABELS = ['', 'x{}']          # one per library function, {} = dimension
+    xu.check_labels(f, LABELS)
 
-    t = np.arange(M) * dt          # exact spacing dt (linspace(0, M*dt, M) is not)
-    t0, tM = t[0], t[-1]
-    x0 = F * np.ones(D)            # equilibrium: L96(F*ones) == 0 exactly,
-    x0[0] += 0.01                  # so perturb to leave it and reach the attractor
-    X = gen_L96(x0, t)
+    DATA = "results/weakvstrongformL96.txt"
+    recompute_data = True   # False skips the sweep and just
+                            # replots what DATA already holds
 
-    # ----- clean-data check -----
-    Wtrue = np.stack(true_coeffs(D, J, F))
-    Ww0 = weak_coefficients(X, f, t0, tM, D, J, r_frac=r_frac, degree=degree,
-                                threshold=threshold)
-    Ws0 = strong_coefficients(X, f, dt, D, J, threshold=threshold)
-    print("clean-data relative coefficient error (no noise):")
-    print(f"  TT-WSINDy (weak)  : {rel_err(Ww0, Wtrue):.3e}")
-    print(f"  MANDy     (strong): {rel_err(Ws0, Wtrue):.3e}")
-    print("-" * 66)
-    print("x_0 -- true vs. recovered coefficients (nonzero true terms):")
-    print(f"  {'monomial':>12}  {'true':>9}  {'weak':>11}  {'strong':>11}")
-    for idx in map(tuple, np.argwhere(np.abs(Wtrue[0]) > 1e-12)):
-        print(f"  {_mono_label(idx):>12}  {Wtrue[0][idx]:>9.3f}"
-                f"  {Ww0[0][idx]:>11.4f}  {Ws0[0][idx]:>11.4f}")
-    print("=" * 66)
+    if recompute_data:
 
-    # ----- noise sweep -----
-    trials_path = "results/weakvstrongformL96_trials.txt"
-    # reuse the realizations a previous run already wrote (--fresh to redo)
-    weak_err, strong_err, done = errorplot.resume_trials(
-        trials_path, noise_levels, n_trials,
-        fresh=errorplot.fresh_from_argv())
-    xfrob_normalized = np.linalg.norm(X, ord='fro') / np.sqrt(X.size)
+        t = np.arange(M) * dt          # exact spacing dt (linspace(0, M*dt, M) is not)
+        t0, tM = t[0], t[-1]
+        x0 = F * np.ones(D)            # equilibrium: L96(F*ones) == 0 exactly,
+        x0[0] += 0.01                  # so perturb to leave it and reach the attractor
+        X = gen_L96(x0, t)
 
-    print(f"noise sweep (relative coefficient error, mean over {n_trials} trials):")
-    print(f"  {'noise sigma':>12}  {'TT-WSINDy':>12}  {'MANDy':>12}  {'ratio S/W':>10}")
-    sweep_st = time()
-    for i, sigma in enumerate(noise_levels):
-        for tr in range(done[i], n_trials):
-            rng = np.random.default_rng(1000 * i + tr)
-            Xn = X + sigma * xfrob_normalized * rng.standard_normal(X.shape)
-            Ww = weak_coefficients(Xn, f, t0, tM, D, J, r_frac=r_frac,
-                                    degree=degree, threshold=threshold)
-            Ws = strong_coefficients(Xn, f, dt, D, J, threshold=threshold)
-            weak_err[i, tr] = rel_err(Ww, Wtrue)
-            strong_err[i, tr] = rel_err(Ws, Wtrue)
-        # checkpoint the level just finished, so an interrupted sweep
-        # resumes from here rather than from the last full run
-        errorplot.save_trials(trials_path, noise_levels, weak_err,
-                              strong_err)
-        wm, sm = weak_err[i].mean(), strong_err[i].mean()
-        print(f"  {sigma:>12.0e}  {wm:>12.3e}  {sm:>12.3e}  {sm / wm:>10.1f}")
-    print(f"(noise sweep walltime: {time() - sweep_st:.1f}s)")
-    print("=" * 66)
+        # ----- clean-data check -----
+        Wtrue = np.stack(true_coeffs(D, J, F))
+        Ww0 = weak_coefficients(X, f, t0, tM, D, J, r_frac=r_frac, degree=degree)
+        Ws0 = strong_coefficients(X, f, dt, D, J)
+        print("clean-data relative coefficient error (no noise):")
+        print(f"  TT-WSINDy (weak)  : {xu.rel_err(Ww0, Wtrue):.3e}")
+        print(f"  MANDy     (strong): {xu.rel_err(Ws0, Wtrue):.3e}")
+        xu.rule('-')
+        xu.print_coeff_table(Wtrue, Ww0, Ws0, LABELS)
+        xu.rule()
 
-    # ----- save results -----
-    os.makedirs("results", exist_ok=True)
-    out = np.column_stack([noise_levels,
-                            np.nanmean(weak_err, 1), np.nanstd(weak_err, 1),
-                            np.nanmean(strong_err, 1), np.nanstd(strong_err, 1)])
-    np.savetxt(f"results/weakvstrongformL96.txt", out,
-                header=f"D={D} M={M} dt={dt} F={F} "
-                        f" r_frac={r_frac:.4f}\n"
-                        "noise weak_mean weak_std strong_mean strong_std")
+        # ----- noise sweep -----
+        weak_err = np.zeros((noise_levels.size, n_trials))
+        strong_err = np.zeros((noise_levels.size, n_trials))
+        xfrob_normalized = np.linalg.norm(X, ord='fro') / np.sqrt(X.size)
 
-    # raw per-trial errors
-    errorplot.save_trials(trials_path,
-                          noise_levels, weak_err, strong_err)
+        print(f"noise sweep (relative coefficient error, mean over {n_trials} trials):")
+        print(f"  {'noise sigma':>12}  {'TT-WSINDy':>12}  {'MANDy':>12}  {'ratio S/W':>10}")
+        sweep_st = time()
+        for i, sigma in enumerate(noise_levels):
+            for tr in range(n_trials):
+                rng = np.random.default_rng(1000 * i + tr)
+                Xn = X + sigma * xfrob_normalized * rng.standard_normal(X.shape)
+                Ww = weak_coefficients(Xn, f, t0, tM, D, J, r_frac=r_frac,
+                                        degree=degree)
+                Ws = strong_coefficients(Xn, f, dt, D, J)
+                weak_err[i, tr] = xu.rel_err(Ww, Wtrue)
+                strong_err[i, tr] = xu.rel_err(Ws, Wtrue)
+            wm, sm = weak_err[i].mean(), strong_err[i].mean()
+            print(f"  {sigma:>12.0e}  {wm:>12.3e}  {sm:>12.3e}  {sm / wm:>10.1f}")
+        print(f"(noise sweep walltime: {time() - sweep_st:.1f}s)")
+        print("=" * 66)
+
+        # ----- save results -----
+        os.makedirs("results", exist_ok=True)
+        out = np.column_stack([noise_levels,
+                                weak_err.mean(1), weak_err.std(1),
+                                strong_err.mean(1), strong_err.std(1)])
+        np.savetxt(DATA, out,
+                    header=f"D={D} M={M} dt={dt} F={F} "
+                            f" r_frac={r_frac:.4f}\n"
+                            "noise weak_mean weak_std strong_mean strong_std")
+
+    # the figure is drawn from DATA either way, so a rerun and a
+    # replot produce exactly the same plot
+    if not os.path.exists(DATA):
+        raise SystemExit(f"{DATA} not found -- set recompute_data = True and rerun")
+    noise_levels, wm, ws, sm, ss = np.atleast_2d(np.loadtxt(DATA)).T
 
     # ----- plot -----
-    wm, ws = weak_err.mean(1), weak_err.std(1)
-    sm, ss = strong_err.mean(1), strong_err.std(1)
     floor = max(noise_levels[1] / 10, 1e-6)   # x-position for the sigma=0 point
     x_axis = np.where(noise_levels > 0, noise_levels, floor)
 
-    # errorbar (mean +- std) or box (full per-trial spread); see errorplot.STYLE
-    # or pass --box / --errorbar on the command line
-    style = errorplot.style_from_argv()
+    # mean +- one standard deviation over trials, joined into a line
     ax = plt.figure(figsize=(7, 5)).gca()
-    hw = errorplot.draw_series(ax, x_axis, wm, ws, weak_err, style=style,
-                               color='C0', marker='o',
-                               label='TT-WSINDy (weak form)',
-                               dodge=1.0 / errorplot.DODGE)
-    hs = errorplot.draw_series(ax, x_axis, sm, ss, strong_err, style=style,
-                               color='C1', marker='s',
-                               label='MANDy (strong form, finite diff.)',
-                               dodge=errorplot.DODGE)
+    hw = ax.errorbar(x_axis, wm, yerr=ws, marker='o', capsize=3,
+                     color='C0', ls='-', label='TT-WSINDy (weak form)')
+    hs = ax.errorbar(x_axis, sm, yerr=ss, marker='s', capsize=3,
+                     color='C1', ls='-',
+                     label='MANDy (strong form, finite diff.)')
     plt.xscale('log')
     plt.yscale('log')
     plt.ylim(1e-6, 1e0)

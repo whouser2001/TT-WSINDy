@@ -1,19 +1,6 @@
 """
 Walltime and support-recovery scan vs system dimension D for the standard
 Lorenz-96 identification problem.
-
-Sampling is a fixed step DT and a fixed number of time points M for every D, so
-walltime vs D isolates the dimension. The test-function radius is pinned at
-10*DT = 0.5 time units (R_FRAC = 10/M), so phi is the same physical width at
-every D. That radius is not incidental: phi's PHYSICAL width, not its tap count
-or the trajectory span, is what lets the coarse pass prune to the true product
-support -- at radius 2.0 it never prunes, even given 9.7x more rows than
-candidate columns. Any dimension whose trials do not all recover the full true support is rerun
-from scratch at a larger M -- see M_ESCALATION.
-
-Flat WSINDy's STLS threshold sweep is FLAT_LDS, a fixed grid; its range has to
-bracket the gap between true and spurious coefficient magnitudes for the given
-sampling, or the sweep returns only dense supports. See the note there.
 """
 import os, sys, itertools
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -28,6 +15,7 @@ from time import time
 from scipy.signal import correlate
 from scipy.integrate import odeint
 import test_function
+import exputils as xu
 from ttwsindy import TT_WSINDy
 from wsindy import wsindy   # original WSINDy-folder sparsifier (sparsifyDynamics)
 
@@ -38,7 +26,7 @@ t0 = 0.0                    # sampling starts here
 DT = 0.1                    # sampling step, FIXED across the scan
 M = 3000                    # number of time points -- set per D by set_sampling()
 tM = t0 + DT*M              # so the window lengthens with M, it does not refine
-D_MIN, D_MAX = 5, 12        # dimension scan (inclusive)
+D_MIN, D_MAX = 5, 9        # dimension scan (inclusive)
 NUM_TRIALS = 3              # trials averaged per datapoint (distinct IC seeds)
 
 # candidate library f = {1, x}  (J = 2); its tensor product spans the true model
@@ -235,8 +223,8 @@ def make_figures(rows, sizes_rows):
     """Draw the figures from already-computed rows.
 
     Kept separate from the sweep so the figures can be redrawn from the
-    saved data files without recomputing anything (see
-    plot_walltime_support_vs_D.py).
+    saved data files without recomputing anything (recompute_data = False in
+    the main block below).
 
     Parameters
     ----------
@@ -411,26 +399,35 @@ def make_figures(rows, sizes_rows):
     plt.savefig(f'{RESULTS}/support_reduction_vs_D{FILE_SUFFIX}.png', dpi=150)
     print(f"saved {RESULTS}/support_reduction_vs_D{FILE_SUFFIX}.png")
 
-if __name__ == '__main__':
+
+# ----------------------------- data files ------------------------------------
+DATA = f'{RESULTS}/walltime_support_vs_D{FILE_SUFFIX}.txt'
+SIZES = f'{RESULTS}/support_sizes_vs_D{FILE_SUFFIX}.txt'
+# 8 per-datapoint metrics; the data file stores mean then sd (over trials).
+METRICS = ["t_TT16", "t_flat",
+           "recall_TT16", "recall_flat",
+           "spur_TT16", "spur_flat",
+           "cerr_TT16", "cerr_flat"]
+HEADER = (f"mean(cols 1..8) then sd(cols 9..16) over {NUM_TRIALS} trials; "
+          f"dt={DT}, {NOISE_LABEL}, last col = M used at that D\n"
+          "D  " + " ".join(METRICS) + "  "
+          + " ".join(m + "_sd" for m in METRICS) + "  M")
+SIZES_HEADER = ("mean over %d trials (TT-WSINDy, %s); last col = M\n"
+                "D initial coarse fine coarse_sd fine_sd M"
+                % (NUM_TRIALS, NOISE_LABEL))
+
+
+def run_scan():
+    """Run the whole D_MIN..D_MAX sweep and write DATA and SIZES.
+
+    Every D is recomputed and both result files are overwritten; nothing is
+    read back from disk, so the outputs always describe one run at one set of
+    hyperparameters (M aside, which is per-D and is recorded in the last column
+    of both files). The files are rewritten after every D, so a scan that is
+    interrupted keeps the dimensions it finished -- but the next run starts
+    over from D_MIN rather than resuming, and no previous run is merged in.
+    """
     os.makedirs(RESULTS, exist_ok=True)
-    # Every run recomputes every D in the scan and overwrites the result
-    # files; nothing is read back from disk, so the outputs always describe
-    # one run at one set of hyperparameters (M aside, which is per-D and is
-    # recorded in the last column of both files).
-    DATA = f'{RESULTS}/walltime_support_vs_D{FILE_SUFFIX}.txt'
-    SIZES = f'{RESULTS}/support_sizes_vs_D{FILE_SUFFIX}.txt'
-    # 8 per-datapoint metrics; the data file stores mean then sd (over trials).
-    METRICS = ["t_TT16", "t_flat",
-               "recall_TT16", "recall_flat",
-               "spur_TT16", "spur_flat",
-               "cerr_TT16", "cerr_flat"]
-    HEADER = (f"mean(cols 1..8) then sd(cols 9..16) over {NUM_TRIALS} trials; "
-              f"dt={DT}, {NOISE_LABEL}, last col = M used at that D\n"
-              "D  " + " ".join(METRICS) + "  "
-              + " ".join(m + "_sd" for m in METRICS) + "  M")
-    SIZES_HEADER = ("mean over %d trials (TT-WSINDy, %s); last col = M\n"
-                    "D initial coarse fine coarse_sd fine_sd M"
-                    % (NUM_TRIALS, NOISE_LABEL))
 
     Ds = list(range(D_MIN, D_MAX + 1))
 
@@ -503,7 +500,33 @@ if __name__ == '__main__':
         np.savetxt(SIZES, np.array(sizes_rows, float),
                    header=SIZES_HEADER, fmt="%.6g")
 
-    # this run's full data set, in scan order
-    rows = np.array(data_rows, float)
+
+def load_data():
+    """Read DATA and SIZES back as (rows, sizes_rows), 2-D arrays.
+
+    Both files are keyed to FILE_SUFFIX, i.e. to NOISE_LEVEL, so a redraw reads
+    exactly the files a run at the same NOISE_LEVEL wrote -- and writes its
+    PNGs under that same suffix.
+    """
+    return xu.load_txt(DATA), xu.load_txt(SIZES)
+
+
+# ------------- main -------------
+if __name__ == '__main__':
+
+    recompute_data = True    # False redraws the figures from the files above,
+                             # which is the only way to get them without paying
+                             # for the sweep again (a run recomputes every D)
+
+    if recompute_data:
+        run_scan()
+
+    rows, sizes_rows = load_data()
+
+    print(f'read {DATA}')
+    have = [int(d) for d in rows[:, 0]]
+    drawn = [d for d in have if d not in PLOT_EXCLUDE]
+    print(f'main data D = {have}')
+    print(f'PLOT_EXCLUDE = {sorted(PLOT_EXCLUDE)}  ->  plotting D = {drawn}')
 
     make_figures(rows, sizes_rows)

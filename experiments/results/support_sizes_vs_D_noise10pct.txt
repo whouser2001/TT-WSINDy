@@ -1,9 +1,0 @@
-# mean over 1 trials (TT-WSINDy, 10% noise); last col = M
-# D initial coarse fine coarse_sd fine_sd M
-4 64 38 23 0 0 10000
-5 160 160 20 0 0 10000
-6 384 384 24 0 0 10000
-7 896 896 28 0 0 10000
-8 2048 2048 32 0 0 15000
-9 4608 4608 36 0 0 10000
-10 10240 10240 44 0 0 33000

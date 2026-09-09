@@ -7,8 +7,6 @@ from scipy.linalg import lstsq
 from numpy import matlib as mb
 import scipy 
 from scipy.integrate import solve_ivp
-#from kneed import KneeLocator
-
 
 class wsindy:
     """
@@ -28,8 +26,6 @@ class wsindy:
         self.coef = None
         self.multiple_trajectories = multiple_tracjectories
         self.useGLS = useGLS
-        #useGLS = 10**(-12)
-
 
     """
        xobs: x values
@@ -502,13 +498,7 @@ class wsindy:
 
 
     def sparsifyDynamics(self, Theta, dXdt, n, M=None, pinv=None):
-        # pinv : optional precomputed pseudoinverse of Theta_reg. Theta does not
-        # depend on the target dXdt, so when the same library is regressed
-        # against several targets (e.g. one per state dimension) its
-        # pseudoinverse can be formed ONCE and reused for the initial
-        # least-squares solve here, instead of refactorizing per call. This
-        # mirrors TT-WSINDy reusing its pseudoinverse SVD (TT_PI_factors) across
-        # dimensions, so walltime comparisons are apples-to-apples. Only valid
+        # pinv : optional precomputed pseudoinverse of Theta_reg. Only valid
         # for gamma == 0 (pinv must be the pseudoinverse of Theta itself).
         if M is None:
             M = np.ones((Theta.shape[1], 1))

@@ -8,7 +8,7 @@ variable, which the default dimension-major library cannot express, so the
 feature tensor is built with construction='function_major' -- see the note
 above true_coeffs.
 """
-import os, sys, itertools
+import os, sys
 sys.path.insert(0, '.')
 sys.path.insert(0, '../TT-WSINDy')
 import numpy as np
@@ -18,7 +18,8 @@ from scipy.signal import correlate
 from scipy.integrate import odeint
 from feature_tensor import feature_tensor
 from test_function import piecewise_polynomial
-import errorplot
+import exputils as xu
+from functools import partial
 
 alpha = 10
 beta = 14.87
@@ -96,19 +97,8 @@ def true_coeffs(D, J):
         Ws.append(W)
     return Ws
 
-def tt_pi_coeffs(Theta, y, threshold, D, J):
-    """One TT-PI solve, returned as a dense coefficient tensor in original units.
-
-    The shape is the function-major one, (D+1)^(J-1) -- a (D+1) x (D+1) matrix
-    for Chua -- matching true_coeffs.
-
-    TT_PI uses overwrite=False, so Theta is not mutated and no copy is needed.
-    """
-    W = Theta.TT_PI(y)
-    return np.asarray(W.full()).reshape(_tensor_shape(D, J))
-
 def weak_coefficients(X, f, t0, tM, D, J,
-                      r_frac=1.0 / 60.0, degree=16, threshold=1e-10):
+                      r_frac=1.0 / 60.0, degree=16):
     """TT-WSINDy (weak form) coefficient tensors, one row per output dim.
 
     Chua is first order, so one integration by parts moves the single derivative
@@ -127,10 +117,10 @@ def weak_coefficients(X, f, t0, tM, D, J,
     # the order-1 dphi equals phi', so -correlate(x, dphi) = -<x, phi'>
     Y = -1 * correlate(X, np.expand_dims(dphi, axis=0),
                        mode='valid').transpose()                # (Mp, D)
-    return np.stack([tt_pi_coeffs(Theta, Y[:, d], threshold, D, J)
+    return np.stack([xu.tt_pi_coeffs(Theta, Y[:, d], _tensor_shape(D, J))
                      for d in range(D)])
 
-def strong_coefficients(X, f, dt, D, J, threshold=1e-10):
+def strong_coefficients(X, f, dt, D, J):
     """MANDy (strong form) coefficient tensors, one row per output dim.
 
     The LHS x' is a 3-point central finite difference of the trajectory; the
@@ -140,41 +130,8 @@ def strong_coefficients(X, f, dt, D, J, threshold=1e-10):
     Xdot = (X[:, 2:] - X[:, :-2]) / (2 * dt)                # (D, M-2)
     Theta = feature_tensor(X[:, 1:-1], f, phi=None, low_rank=True,
                            construction='function_major')
-    return np.stack([tt_pi_coeffs(Theta, Xdot[d], threshold, D, J)
+    return np.stack([xu.tt_pi_coeffs(Theta, Xdot[d], _tensor_shape(D, J))
                      for d in range(D)])
-
-def rel_err(W, Wtrue):
-    """Relative 2-norm error over the full stacked coefficient tensor."""
-    return np.linalg.norm(W - Wtrue) / np.linalg.norm(Wtrue)
-
-def _mono_label(idx, D=3):
-    """Readable label for a function-major index, e.g. (0, 0) -> 'x0 |x0|'.
-
-    idx is (dimension for x, dimension for |x|); D means that factor is absent.
-    """
-    a, b = idx
-    parts = ([f"x{a}"] if a < D else []) + ([f"|x{b}|"] if b < D else [])
-    return "1" if not parts else " ".join(parts)
-
-def library_rank(X, f, D, J, tol=1e-10):
-    """Numerical rank of the function-major candidate library, and its size.
-
-    Enumerates the (D+1)^(J-1) candidates -- one placement per non-constant
-    function, index D meaning absent -- and returns the numerical rank of the
-    pointwise library alongside the candidate count. A rank below that count
-    means the candidates are linearly dependent along the data, so the
-    un-thresholded TT-PI cannot recover the sparse truth.
-    """
-    M = X.shape[1]
-    cols = []
-    for picks in itertools.product(range(D + 1), repeat=J - 1):
-        c = np.ones(M)
-        for j, d in enumerate(picks):
-            if d < D:
-                c = c * np.vectorize(f[j + 1])(X[d]).astype(float)
-        cols.append(c)
-    s = np.linalg.svd(np.stack(cols), compute_uv=False)
-    return int(np.sum(s / s[0] > tol)), len(cols)
 
 # -----
 # main
@@ -187,113 +144,107 @@ if __name__ == '__main__':
     dt = 0.01           # snapshot spacing
     r_frac = 1.0 / 2000.0 # test-fn radius as a fraction of the time span
     degree = 16         # test-function polynomial degree
-    threshold = 1e-16   # TT-PI singular-value truncation (regularized pinv)
 
     noise_levels = np.array([1e-5, 1e-4, 1e-3, 1e-2, 5e-2, 1e-1, 2e-1, 4e-1])
     n_trials = 40      # noise realizations averaged per level
 
     f = [lambda x: 1, lambda x: x, lambda x: np.abs(x)]
     J = len(f)
+    # function-major library: one label per NON-constant function, and the
+    # label function needs D to know which slots mean "absent"
+    LABELS = ['x{}', '|x{}|']
+    xu.check_labels(f, LABELS, function_major=True)
+    label_fn = partial(xu.function_major_label, D=D)
 
     t = np.arange(M) * dt          # exact spacing dt (linspace(0, M*dt, M) is not)
-    t0, tM = t[0], t[-1]
-    x0 = np.array([-1.13, 0.004, 0.45])
-    X = gen_chua(x0, t)
+    t0, tM = t[0], t[-1]           # the plot title needs tM on both paths
 
-    rank, ncand = library_rank(X, f, D, J)
-    sign_changes = int(np.sum(np.diff(np.sign(X[0])) != 0))
+    DATA = "results/weakvstrongformChua.txt"
+    recompute_data = True   # False skips the sweep and just
+                            # replots what DATA already holds
 
-    print("=" * 66)
-    print("Chua's circuit")
-    print(f"  D={D}, M={M} snapshots, dt={dt}, T={tM:.1f}")
-    print(f"  alpha={alpha}, beta={beta}, "
-          f"delta=({delta[0]:+.4f}, {delta[1]:+.4f})")
-    print("  x0=[" + ", ".join(f"{v:g}" for v in x0) + "]")
-    print("  state ranges            : " + ",  ".join(
-        f"x{i} [{X[i].min():+.2f}, {X[i].max():+.2f}]" for i in range(D)))
-    print(f"  x0 sign changes         : {sign_changes}"
-          f"   (the |x| kink is only sampled where x0 crosses 0)")
-    print(f"  library rank            : {rank}/{ncand}"
-          f"  {'(full rank)' if rank == ncand else '(RANK DEFICIENT)'}")
-    print("=" * 66)
+    if recompute_data:
 
-    # ----- clean-data check -----
-    Wtrue = np.stack(true_coeffs(D, J))
-    Ww0 = weak_coefficients(X, f, t0, tM, D, J, r_frac=r_frac, degree=degree,
-                            threshold=threshold)
-    Ws0 = strong_coefficients(X, f, dt, D, J, threshold=threshold)
-    print("clean-data relative coefficient error (no noise):")
-    print(f"  TT-WSINDy (weak)  : {rel_err(Ww0, Wtrue):.3e}")
-    print(f"  MANDy     (strong): {rel_err(Ws0, Wtrue):.3e}")
-    print("-" * 66)
-    print("true vs. recovered coefficients (nonzero true terms, all equations):")
-    print(f"  {'eq':>4}  {'candidate':>10}  {'true':>9}  {'weak':>11}  {'strong':>11}")
-    for d in range(D):
-        for idx in map(tuple, np.argwhere(np.abs(Wtrue[d]) > 1e-12)):
-            print(f"  x{d}'   {_mono_label(idx, D):>10}  {Wtrue[d][idx]:>9.4f}"
-                  f"  {Ww0[d][idx]:>11.4f}  {Ws0[d][idx]:>11.4f}")
-    print("=" * 66)
+        x0 = np.array([-1.13, 0.004, 0.45])
+        X = gen_chua(x0, t)
 
-    # ----- noise sweep -----
-    trials_path = "results/weakvstrongformChua_trials.txt"
-    # reuse the realizations a previous run already wrote (--fresh to redo)
-    weak_err, strong_err, done = errorplot.resume_trials(
-        trials_path, noise_levels, n_trials,
-        fresh=errorplot.fresh_from_argv())
-    xfrob_normalized = np.linalg.norm(X, ord='fro') / np.sqrt(X.size)
+        rank, ncand = xu.library_rank_function_major(X, f, D, J)
+        sign_changes = int(np.sum(np.diff(np.sign(X[0])) != 0))
 
-    print(f"noise sweep (relative coefficient error, mean over {n_trials} trials):")
-    print(f"  {'noise sigma':>12}  {'TT-WSINDy':>12}  {'MANDy':>12}  {'ratio S/W':>10}")
-    sweep_st = time()
-    for i, sigma in enumerate(noise_levels):
-        for tr in range(done[i], n_trials):
-            rng = np.random.default_rng(1000 * i + tr)
-            Xn = X + sigma * xfrob_normalized * rng.standard_normal(X.shape)
-            Ww = weak_coefficients(Xn, f, t0, tM, D, J, r_frac=r_frac,
-                                   degree=degree, threshold=threshold)
-            Ws = strong_coefficients(Xn, f, dt, D, J, threshold=threshold)
-            weak_err[i, tr] = rel_err(Ww, Wtrue)
-            strong_err[i, tr] = rel_err(Ws, Wtrue)
-        # checkpoint the level just finished, so an interrupted sweep
-        # resumes from here rather than from the last full run
-        errorplot.save_trials(trials_path, noise_levels, weak_err,
-                              strong_err)
-        wm, sm = weak_err[i].mean(), strong_err[i].mean()
-        print(f"  {sigma:>12.0e}  {wm:>12.3e}  {sm:>12.3e}  {sm / wm:>10.1f}")
-    print(f"(noise sweep walltime: {time() - sweep_st:.1f}s)")
-    print("=" * 66)
+        print("=" * 66)
+        print("Chua's circuit")
+        print(f"  D={D}, M={M} snapshots, dt={dt}, T={tM:.1f}")
+        print(f"  alpha={alpha}, beta={beta}, "
+              f"delta=({delta[0]:+.4f}, {delta[1]:+.4f})")
+        print("  x0=[" + ", ".join(f"{v:g}" for v in x0) + "]")
+        print("  state ranges            : " + ",  ".join(
+            f"x{i} [{X[i].min():+.2f}, {X[i].max():+.2f}]" for i in range(D)))
+        print(f"  x0 sign changes         : {sign_changes}"
+              f"   (the |x| kink is only sampled where x0 crosses 0)")
+        print(f"  library rank            : {rank}/{ncand}"
+              f"  {'(full rank)' if rank == ncand else '(RANK DEFICIENT)'}")
+        print("=" * 66)
 
-    # ----- save results -----
-    os.makedirs("results", exist_ok=True)
-    out = np.column_stack([noise_levels,
-                           np.nanmean(weak_err, 1), np.nanstd(weak_err, 1),
-                           np.nanmean(strong_err, 1), np.nanstd(strong_err, 1)])
-    np.savetxt(f"results/weakvstrongformChua.txt", out,
-               header=f"D={D} M={M} dt={dt} alpha={alpha} beta={beta} "
-                      f"delta=({delta[0]:.6f},{delta[1]:.6f}) "
-                      f"r_frac={r_frac:.5f} n_trials={n_trials}\n"
-                      "noise weak_mean weak_std strong_mean strong_std")
+        # ----- clean-data check -----
+        Wtrue = np.stack(true_coeffs(D, J))
+        Ww0 = weak_coefficients(X, f, t0, tM, D, J, r_frac=r_frac, degree=degree)
+        Ws0 = strong_coefficients(X, f, dt, D, J)
+        print("clean-data relative coefficient error (no noise):")
+        print(f"  TT-WSINDy (weak)  : {xu.rel_err(Ww0, Wtrue):.3e}")
+        print(f"  MANDy     (strong): {xu.rel_err(Ws0, Wtrue):.3e}")
+        xu.rule('-')
+        xu.print_coeff_table(Wtrue, Ww0, Ws0, LABELS, eqs=range(D),
+                             label_fn=label_fn)
+        xu.rule()
 
-    # raw per-trial errors, which the box style needs
-    errorplot.save_trials(trials_path,
-                          noise_levels, weak_err, strong_err)
+        # ----- noise sweep -----
+        weak_err = np.zeros((noise_levels.size, n_trials))
+        strong_err = np.zeros((noise_levels.size, n_trials))
+        xfrob_normalized = np.linalg.norm(X, ord='fro') / np.sqrt(X.size)
+
+        print(f"noise sweep (relative coefficient error, mean over {n_trials} trials):")
+        print(f"  {'noise sigma':>12}  {'TT-WSINDy':>12}  {'MANDy':>12}  {'ratio S/W':>10}")
+        sweep_st = time()
+        for i, sigma in enumerate(noise_levels):
+            for tr in range(n_trials):
+                rng = np.random.default_rng(1000 * i + tr)
+                Xn = X + sigma * xfrob_normalized * rng.standard_normal(X.shape)
+                Ww = weak_coefficients(Xn, f, t0, tM, D, J, r_frac=r_frac,
+                                       degree=degree)
+                Ws = strong_coefficients(Xn, f, dt, D, J)
+                weak_err[i, tr] = xu.rel_err(Ww, Wtrue)
+                strong_err[i, tr] = xu.rel_err(Ws, Wtrue)
+            wm, sm = weak_err[i].mean(), strong_err[i].mean()
+            print(f"  {sigma:>12.0e}  {wm:>12.3e}  {sm:>12.3e}  {sm / wm:>10.1f}")
+        print(f"(noise sweep walltime: {time() - sweep_st:.1f}s)")
+        print("=" * 66)
+
+        # ----- save results -----
+        os.makedirs("results", exist_ok=True)
+        out = np.column_stack([noise_levels,
+                               weak_err.mean(1), weak_err.std(1),
+                               strong_err.mean(1), strong_err.std(1)])
+        np.savetxt(DATA, out,
+                   header=f"D={D} M={M} dt={dt} alpha={alpha} beta={beta} "
+                          f"delta=({delta[0]:.6f},{delta[1]:.6f}) "
+                          f"r_frac={r_frac:.5f} n_trials={n_trials}\n"
+                          "noise weak_mean weak_std strong_mean strong_std")
+
+    # the figure is drawn from DATA either way, so a rerun and a
+    # replot produce exactly the same plot
+    if not os.path.exists(DATA):
+        raise SystemExit(f"{DATA} not found -- set recompute_data = True and rerun")
+    noise_levels, wm, ws, sm, ss = np.atleast_2d(np.loadtxt(DATA)).T
 
     # ----- plot -----
-    wm, ws = weak_err.mean(1), weak_err.std(1)
-    sm, ss = strong_err.mean(1), strong_err.std(1)
 
-    # errorbar (mean +- std) or box (full per-trial spread); see errorplot.STYLE
-    # or pass --box / --errorbar on the command line
-    style = errorplot.style_from_argv()
+    # mean +- one standard deviation over trials, joined into a line
     ax = plt.figure(figsize=(7, 5)).gca()
-    hw = errorplot.draw_series(ax, noise_levels, wm, ws, weak_err, style=style,
-                               color='C0', marker='o',
-                               label='TT-WSINDy (weak form)',
-                               dodge=1.0 / errorplot.DODGE)
-    hs = errorplot.draw_series(ax, noise_levels, sm, ss, strong_err, style=style,
-                               color='C1', marker='s',
-                               label='MANDy (strong form, finite diff.)',
-                               dodge=errorplot.DODGE)
+    hw = ax.errorbar(noise_levels, wm, yerr=ws, marker='o', capsize=3,
+                     color='C0', ls='-', label='TT-WSINDy (weak form)')
+    hs = ax.errorbar(noise_levels, sm, yerr=ss, marker='s', capsize=3,
+                     color='C1', ls='-',
+                     label='MANDy (strong form, finite diff.)')
     plt.xscale('log')
     plt.yscale('log')
     plt.ylim(1e-6, 1e0)

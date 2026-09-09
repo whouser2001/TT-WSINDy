@@ -9,9 +9,8 @@ from ttutils import truncated_svd
 
 class feature_tensor(TT):
     """
-    Build a tensor train of feature cores from data and a list of
-    candidate functions. Extends the TT (tensor train) class from
-    scikit-tt.
+    Tensor train of feature cores from data and a list of candidate functions. 
+    Extends the TT (tensor train) class from scikit-tt.
 
     Methods
     -------
@@ -21,7 +20,6 @@ class feature_tensor(TT):
         Hashable key identifying the current support state.
     compute_weights(W)
         Per-mode importance weights from a coefficient tensor
-        (independent of the threshold lamb).
     threshold_weights(weights, lamb)
         Threshold cached weights into a support mask.
     apply_supp(supp)
@@ -41,7 +39,7 @@ class feature_tensor(TT):
         Parameters
         ----------
         X : np.ndarray
-            Raw data, shape D x M (D system dimensions, M time points).
+            Raw data, shape D x M
             With n_traj > 1, the columns hold n_traj equal-length
             trajectories concatenated along time.
         f : list of callable
