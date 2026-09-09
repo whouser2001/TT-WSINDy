@@ -18,6 +18,7 @@ from scipy.signal import correlate
 from scipy.integrate import odeint
 from feature_tensor import feature_tensor
 from test_function import piecewise_polynomial
+import errorplot
 
 # Tight tolerances so the integrator is never what limits MANDy: the point of
 # the comparison is the O(dt^2) error of the finite-difference stencil, and an
@@ -307,18 +308,6 @@ def rel_err(W, Wtrue):
     """Relative 2-norm error over the full stacked coefficient tensor."""
     return np.linalg.norm(W - Wtrue) / np.linalg.norm(Wtrue)
 
-def rel_err_dims(W, Wtrue):
-    """Relative 2-norm error of EACH output dimension's coefficient tensor.
-
-    Returns an array of length D, entry d being
-    ||W[d] - Wtrue[d]|| / ||Wtrue[d]||, i.e. the error of the equation for
-    x_d alone. The stacked rel_err above is a norm-weighted blend of these, so
-    an equation with small true coefficients can be recovered badly without the
-    stacked number showing it -- which is what the per-dimension curves expose.
-    """
-    return np.array([np.linalg.norm(W[d] - Wtrue[d]) / np.linalg.norm(Wtrue[d])
-                     for d in range(W.shape[0])])
-
 
 def library_rank(X, f, J, tol=1e-10):
     """Numerical rank of the strong (pointwise) candidate library, and J^D.
@@ -361,7 +350,7 @@ if __name__ == "__main__":
     threshold = 1e-16   # TT-PI singular-value truncation (regularized pinv)
 
     noise_levels = np.array([1e-5, 1e-4, 1e-3, 1e-2, 5e-2, 1e-1, 2e-1, 4e-1])
-    n_trials = 1        # noise realizations averaged per level
+    n_trials = 40       # noise realizations averaged per level
 
     f = [lambda x: 1, lambda x: np.sin(x), lambda x: np.cos(x)]
     J = len(f)
@@ -413,81 +402,75 @@ if __name__ == "__main__":
     print("=" * 66)
 
     # ----- noise sweep -----
-    # errors are kept per output dimension: (n_sigma, n_trials, D)
-    weak_err = np.zeros((len(noise_levels), n_trials, D))
-    strong_err = np.zeros((len(noise_levels), n_trials, D))
     # sigma is an ABSOLUTE phase perturbation in radians: the phases are
     # unwrapped and grow with the time span, so scaling sigma by rms(X) (as the
     # FPUT and L96 scripts do) would tie the noise level to T.
+    trials_path = "results/weakvstrongformKuramoto_trials.txt"
+    # reuse the realizations a previous run already wrote (--fresh to redo)
+    weak_err, strong_err, done = errorplot.resume_trials(
+        trials_path, noise_levels, n_trials,
+        fresh=errorplot.fresh_from_argv())
 
-    print(f"noise sweep (relative coefficient error per output dim, "
-          f"mean over {n_trials} trials):")
-    print("  " + f"{'noise sigma':>12}  {'form':>6}"
-          + "".join(f"{f'x{d}':>12}" for d in range(D)))
+    print(f"noise sweep (relative coefficient error, mean over {n_trials} trials):")
+    print(f"  {'noise sigma':>12}  {'TT-WSINDy':>12}  {'MANDy':>12}  {'ratio S/W':>10}")
     sweep_st = time()
     for i, sigma in enumerate(noise_levels):
-        for tr in range(n_trials):
+        for tr in range(done[i], n_trials):
             rng = np.random.default_rng(1000 * i + tr)
             Xn = Xs + sigma * rng.standard_normal(Xs.shape)
             Ww = weak_coefficients(Xn, f, t0, tM, D, J, r_frac=r_frac,
                                    degree=degree, threshold=threshold)
             Ws = strong_coefficients(Xn, f, dt, D, J, threshold=threshold)
-            weak_err[i, tr] = rel_err_dims(Ww, Wtrue)
-            strong_err[i, tr] = rel_err_dims(Ws, Wtrue)
-        wm, sm = weak_err[i].mean(0), strong_err[i].mean(0)
-        print("  " + f"{sigma:>12.0e}  {'weak':>6}"
-              + "".join(f"{v:>12.3e}" for v in wm))
-        print("  " + f"{'':>12}  {'strong':>6}"
-              + "".join(f"{v:>12.3e}" for v in sm))
+            weak_err[i, tr] = rel_err(Ww, Wtrue)
+            strong_err[i, tr] = rel_err(Ws, Wtrue)
+        # checkpoint the level just finished, so an interrupted sweep
+        # resumes from here rather than from the last full run
+        errorplot.save_trials(trials_path, noise_levels, weak_err,
+                              strong_err)
+        wm, sm = weak_err[i].mean(), strong_err[i].mean()
+        print(f"  {sigma:>12.0e}  {wm:>12.3e}  {sm:>12.3e}  {sm / wm:>10.1f}")
     print(f"(noise sweep walltime: {time() - sweep_st:.1f}s)")
     print("=" * 66)
 
     # ----- save results -----
-    # column layout: noise, then four D-wide blocks (weak_mean, weak_std,
-    # strong_mean, strong_std), one column per output dimension in each block.
-    # plot_weakvstrongform.py recovers D as (ncols - 1) // 4.
     os.makedirs("results", exist_ok=True)
     out = np.column_stack([noise_levels,
-                           weak_err.mean(1), weak_err.std(1),
-                           strong_err.mean(1), strong_err.std(1)])
-    cols = " ".join(["noise"]
-                    + [f"{stat}_d{d}"
-                       for stat in ("weak_mean", "weak_std",
-                                    "strong_mean", "strong_std")
-                       for d in range(D)])
+                           np.nanmean(weak_err, 1), np.nanstd(weak_err, 1),
+                           np.nanmean(strong_err, 1), np.nanstd(strong_err, 1)])
     np.savetxt(f"results/weakvstrongformKuramoto.txt", out,
-               header=(f"D={D} n_traj={n_traj} M={M} dt={dt} K={K} h={h} "
-                       f"omega_min={omega_min} omega_max={omega_max} "
-                       f"r_frac={r_frac:.4f} n_trials={n_trials}")
-                      + "\n" + cols)
+               header=f"D={D} n_traj={n_traj} M={M} dt={dt} K={K} h={h} "
+                      f"omega_min={omega_min} omega_max={omega_max} "
+                      f"r_frac={r_frac:.4f}\n"
+                      "noise weak_mean weak_std strong_mean strong_std")
+
+    # raw per-trial errors, which the box style needs
+    errorplot.save_trials(trials_path,
+                          noise_levels, weak_err, strong_err)
 
     # ----- plot -----
-    wm, ws = weak_err.mean(1), weak_err.std(1)        # (n_sigma, D)
+    wm, ws = weak_err.mean(1), weak_err.std(1)
     sm, ss = strong_err.mean(1), strong_err.std(1)
-    x_axis = noise_levels
 
-    # one shade per output dimension, blues for the weak form and reds for the
-    # strong form, so the two families stay separable with D lines each
-    wcol = plt.cm.Blues(np.linspace(0.45, 0.95, D))
-    scol = plt.cm.Reds(np.linspace(0.45, 0.95, D))
-
-    plt.figure(figsize=(7.5, 5))
-    # all weak lines first, then all strong, so the two-column legend fills
-    # column-major with one form per column
-    for d in range(D):
-        plt.errorbar(x_axis, wm[:, d], yerr=ws[:, d], marker='o', capsize=3,
-                     color=wcol[d], label=rf'weak $x_{{{d}}}$')
-    for d in range(D):
-        plt.errorbar(x_axis, sm[:, d], yerr=ss[:, d], marker='s', capsize=3,
-                     ls='--', color=scol[d], label=rf'strong $x_{{{d}}}$')
+    # errorbar (mean +- std) or box (full per-trial spread); see errorplot.STYLE
+    # or pass --box / --errorbar on the command line
+    style = errorplot.style_from_argv()
+    ax = plt.figure(figsize=(7, 5)).gca()
+    hw = errorplot.draw_series(ax, noise_levels, wm, ws, weak_err, style=style,
+                               color='C0', marker='o',
+                               label='TT-WSINDy (weak form)',
+                               dodge=1.0 / errorplot.DODGE)
+    hs = errorplot.draw_series(ax, noise_levels, sm, ss, strong_err, style=style,
+                               color='C1', marker='s',
+                               label='MANDy (strong form, finite diff.)',
+                               dodge=errorplot.DODGE)
     plt.xscale('log')
     plt.yscale('log')
     plt.ylim(1e-6, 1e0)
     plt.xlabel(r'phase noise $\sigma$ (radians)')
     plt.ylabel('relative coefficient error')
-    plt.title(('Weak vs. strong form TT regression on Kuramoto '
-               f'(D={D}, {n_traj} traj. x M={M})'))
-    plt.legend(ncol=2, fontsize=8)
+    plt.title('Weak vs. strong form TT regression on Kuramoto '
+              f'(D={D}, {n_traj} traj. x M={M})')
+    plt.legend(handles=[hw, hs])
     plt.grid(True, which='both', ls=':', alpha=0.5)
     plt.tight_layout()
     plt.savefig(f"results/weakvstrongformKuramoto.png", dpi=150)

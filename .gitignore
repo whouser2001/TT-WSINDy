@@ -1,0 +1,5 @@
+.claude
+.vscode
+/examples/
+/experiments/__pycache__/
+/TT-WSINDy/__pycache__/

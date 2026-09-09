@@ -19,7 +19,8 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
                 threshold=0.0,
                 verbosity=0,
                 low_rank=False,
-                one_pass=False):
+                one_pass=False,
+                timings=None):
     """
     TT-WSINDy.
  
@@ -77,6 +78,16 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
         If true, performs TT-STLS non-iteratively; only performing
         a single regression/sparsification step.
         Preferred roughly when J^D is of the order 10^3 or smaller.
+    timings : dict, optional
+        If a dict is given, a per-stage wall-clock breakdown of the run is
+        written into it. Keys: 'feature_tensor' (compressed-TT construction),
+        'pi_factors' (the single global TT-PI SVD taken up front when
+        one_pass, else 0.0 -- with one_pass this is usually the dominant
+        stage), 'tt_mstls' and 'mstls' (the coarse and fine sparsification
+        loops, matching the returned cumulative times), 'library_rebuild'
+        (re-forming and convolving the flat G on each coarse support) and
+        'total', plus 'ranks', the feature tensor's TT bond ranks as built. The stages sum to 'total' up to small unattributed bits
+        (test function, the Y convolution, bookkeeping).
 
     Returns
     -------
@@ -118,11 +129,13 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
         return NotImplementedError('Test function string ' \
         'not supported. Enter one of piecewise_polynomial, manual.')
     
+    ft_st = time()
     Theta = feature_tensor(X, f, 
                             threshold=threshold,
                             phi=phi,
                             verbose=debug,
                             low_rank=low_rank)
+    ft_time = time() - ft_st
     
     # compute the weak-form left-hand side
     phi = np.expand_dims(phi, axis=0)
@@ -136,11 +149,14 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
     coarse_supps = []
 
     # If one_pass, compute the single TT SVD here
+    pi_st = time()
     pi_factors = Theta.svd(D, threshold=Theta.threshold,
                         ortho_l=True, ortho_r=True, overwrite=False) if one_pass else None
+    pi_time = time() - pi_st
 
     tt_mstls_time = 0
     mstls_time = 0
+    rebuild_time = 0
     for d in range(D):
 
         # coarse pass: TT-MSTLS
@@ -162,6 +178,7 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
             print(f'coarse support: {suppStar}')
             print('Beginning flat MSTLS')
 
+        rebuild_st = time()
         coarse_supp = Theta_star.all_active_features()
         coarse_supps.append(coarse_supp)
         feature_map = list(itertools.product(*coarse_supp))
@@ -189,6 +206,7 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
             G[k, :] = gk
 
         G = correlate(G, phi, mode='valid').transpose()
+        rebuild_time += time() - rebuild_st
 
         # fine pass: MSTLS
         mstls_st = time()
@@ -205,6 +223,13 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
         mstls_time += mstls_end - mstls_st
 
     ttwsindy_time = time() - st
+
+    if timings is not None:
+        timings.update(feature_tensor=ft_time, pi_factors=pi_time,
+                       tt_mstls=tt_mstls_time, mstls=mstls_time,
+                       library_rebuild=rebuild_time, total=ttwsindy_time,
+                       ranks=list(Theta.ranks))
+
     if verbose:
         print('------------------')
         print('TT-WSINDy complete.')
