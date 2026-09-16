@@ -5,65 +5,12 @@ import numpy as np
 from time import time
 from scikit_tt.tensor_train import TT
 from scipy.signal import correlate
-
-
-def _truncated_svd(A, threshold, small=700, n_oversamples=12, n_iter=2):
-    """
-    Thin SVD keeping the singular triplets with s > tol (= rel*s[0]), where
-    rel = threshold (or 1e-13 if threshold==0).
-
-    For a tall/wide matrix whose effective rank is far below min(A.shape) -- as
-    happens at the weak feature tensor's time-core bond, where convolving with
-    the test function collapses the rank -- a full SVD wastes almost all its
-    work. This uses a randomized range finder (Halko-Martinsson-Tropp) with an
-    adaptive target rank: the rank is doubled until the smallest computed
-    singular value drops below tol (so the entire significant subspace is
-    captured), with a full-SVD fallback for small matrices or genuinely
-    high-rank inputs. Returns U (orthonormal columns), s, Vt truncated to the
-    kept rank.
-    """
-    m, n = A.shape
-    p = min(m, n)
-    rel = threshold if threshold > 0 else 1e-13
-
-    if p <= small:                                    # full SVD already cheap
-        U, s, Vt = np.linalg.svd(A, full_matrices=False)
-    else:
-        rng = np.random.default_rng(0)
-        target = 256
-        while True:
-            ell = min(target + n_oversamples, p)
-            Q, _ = np.linalg.qr(A @ rng.standard_normal((n, ell)))
-            for _ in range(n_iter):                   # power iters (sharpen gap)
-                Q, _ = np.linalg.qr(A @ (A.T @ Q))
-            B = Q.T @ A                               # (ell, n), small
-            Ub, s, Vt = np.linalg.svd(B, full_matrices=False)
-            U = Q @ Ub
-            s0 = s[0] if s.size and s[0] > 0 else 1.0
-            if ell >= p or s[-1] <= rel * s0:         # captured all significant
-                break
-            target = min(target * 2, p)               # else widen and retry
-
-    s0 = s[0] if s.size and s[0] > 0 else 1.0
-    k = max(int(np.sum(s > rel * s0)), 1)
-    return U[:, :k], s[:k], Vt[:k]
-
+from ttutils import truncated_svd
 
 class feature_tensor(TT):
     """
-    Build a tensor train of feature cores from data and a list of
-    candidate functions. Extends the TT (tensor train) class from
-    scikit-tt.
-
-    Parameters
-    ----------
-    X : np.ndarray
-        Raw data, shape D x M (D system dimensions, M time points).
-    f : list of callable
-        Candidate functions fj : R -> R.
-    phi : np.ndarray or None
-        Discretization of a compactly supported test function, as a
-        vector. None selects the strong form.
+    Tensor train of feature cores from data and a list of candidate functions.
+    Extends the TT (tensor train) class from scikit-tt.
 
     Methods
     -------
@@ -72,141 +19,156 @@ class feature_tensor(TT):
     support_key()
         Hashable key identifying the current support state.
     compute_weights(W)
-        Per-mode importance weights from a coefficient tensor
-        (independent of the threshold lamb).
+        Per-mode importance weights from a coefficient tensor.
     threshold_weights(weights, lamb)
         Threshold cached weights into a support mask.
-    coarse_supp(W, lamb)
-        Coarse support of W at threshold lamb.
     apply_supp(supp)
         Reduce the feature tensor to the features in supp.
-    TT_PI(x, threshold)
-        TT pseudoinverse regression against x, with optional SVD
-        rank truncation.
-    TT_STLS(x, lamb, threshold, weight_cache)
+    TT_PI(x, factors)
+        TT pseudoinverse regression against x.
+    TT_STLS(x, lamb, weight_cache)
         Tensor-train sequential thresholding least squares.
-    unscale(W)
-        Undo the per-feature normalization of a coefficient estimate.
     supp_size(supp)
         Size of the support induced by a mask.
     """
 
-    def __init__(self, X, f, threshold=0, phi=None, verbose=False, low_rank=True,
-                 slice_scaling=False, normalize=True):
+    def __init__(self, X, f, threshold=0.0, phi=None, verbose=False, low_rank=True,
+                 n_traj=1, construction='dimension_major'):
         """
         Parameters
         ----------
         X : np.ndarray
-            Raw data, shape D x M (D system dimensions, M time points).
+            Raw data, shape D x M. With n_traj > 1, the columns hold n_traj
+            equal-length trajectories concatenated along time.
         f : list of callable
             Candidate functions fj : R -> R.
+        threshold : float
+            Truncation parameter applied to the matrix SVDs in TT-PI.
+            threshold=0.0 computes pseudoinverses exactly.
         phi : np.ndarray or None
             Discretization of a compactly supported test function, as a
             vector. None selects the strong form.
         verbose : bool
             If True, print progress/debugging information.
-        normalize : bool
-            If True (default), each feature f_j(X[d]) is divided by its
-            2-norm during construction, so every feature column enters the
-            tensor at unit scale (feature_norms records the divisors, used to
-            unscale coefficient estimates back to original units). If False,
-            features are left in their raw scale and feature_norms is all ones;
-            the pseudoinverse then sees the un-normalized, scale-disparate
-            library directly.
         low_rank : bool
-            Construction method. The naive construction stores diagonal cores
-            of shape (M, J, 1, M), i.e. O(D J M^2) memory, which is infeasible
-            for large M. With low_rank=True (default) the same feature tensor is
-            built directly in compressed form by a left-to-right SVD sweep over
-            a small "carry" matrix: the internal bonds collapse to the true
-            ranks (<= J^min(d, D-d)) and only the final (time) core scales with
-            M, giving O(J^D + r M) memory -- linear in M. The two paths are
-            numerically equivalent (to the SVD threshold). Set low_rank=False to
-            force the original dense construction.
+            Build the train directly in compressed form, by a left-to-right
+            SVD sweep over a small carry matrix. Preferred for large M, and
+            when the dense feature tensor does not fit in memory.
+        n_traj : int
+            Number of independent trajectories concatenated along the time
+            axis of X, each of length M / n_traj. Only the weak-form
+            convolution is trajectory-aware: phi is correlated within each
+            trajectory separately, so no row of the final mode straddles a
+            boundary.
+        construction : str
+            Which set of candidates the train enumerates.
+
+            'dimension_major' (default): one mode per state dimension, of size
+            J, giving J^D candidates. Two functions can never act on the same
+            dimension.
+
+            'function_major': one mode per non-constant candidate function, of
+            size D+1, giving (D+1)^(J-1) candidates. Mode j picks the dimension
+            f_j acts on, or the extra slot meaning absent. Same-dimension
+            products are in the span; a single function cannot be reused.
+            Requires low_rank=True.
 
         Attributes (beyond those provided by TT)
         ----------
         verbose : bool
             If True, print progress/debugging information.
         snapshots : int
-            Number of time points (M) in the data.
+            Total number of time points (M) in the data, over all
+            trajectories.
+        n_traj : int
+            Number of trajectories concatenated along the time axis.
         Mp : int
             Length of the final (weak/strong) mode. Equals M for the
-            strong form, or M - len(phi) + 1 for the weak form.
-        feature_norms : np.ndarray
-            Per-(candidate function, dimension) normalization factors,
-            shape (J, D).
+            strong form, or n_traj * (M/n_traj - len(phi) + 1) for the
+            weak form.
         supp_indices : list of np.ndarray
             supp_indices[d] maps each surviving feature in dimension d
             back to its index in the original candidate-function list,
             for d = 0, ..., D-1 (the weak/strong core is excluded).
             Initialized to the identity (all J features active per dim).
+        threshold : float
+            Truncation parameter applied to the matrix SVDs in TT-PI.
+
+        Raises
+        ------
+        ValueError
+            If the number of time points is not a multiple of n_traj, or if an
+            invalid construction string is given.
+        NotImplementedError
+            If construction='function_major' is used without low_rank.
         """
         J = len(f)
         D,self.snapshots = X.shape if X.ndim > 1 else (1,X.size)
-
         M = self.snapshots
 
-        # basis evaluations B[j, d, :] = f_j(X[d, :]), optionally normalized by
-        # the per-(feature, dim) 2-norm (shared by both constructions). With
-        # normalize=False the norms stay 1 and features enter at raw scale.
-        norms = np.ones((J, D))
+        if M % n_traj != 0:
+            raise ValueError(
+                f"Number of time points ({M}) must be a multiple of "
+                f"n_traj ({n_traj})"
+            )
+        m_traj = M // n_traj                             # points per trajectory
+
+        # basis evaluations B[j, d, :] = f_j(X[d, :])
         B = np.zeros((J, D, M))
         for j in range(J):
-            fX = np.vectorize(f[j])(X).astype(float)        # (D, M)
-            if normalize:
-                for d in range(D):
-                    nrm = np.linalg.norm(fX[d, :]) if D > 1 else np.linalg.norm(fX)
-                    norms[j, d] = nrm if nrm > 0 else 1.0
-            B[j] = fX / norms[j][:, None]
+            B[j] = np.vectorize(f[j])(X).astype(float)        # (D, M)
+
+        # dimension or function major construction
+        if construction == 'dimension_major':
+            slices = [B[:, d, :] for d in range(D)]
+        elif construction == 'function_major':
+            slices = [np.vstack([B[j], np.ones((1, M))]) for j in range(1, J)]
+        else:
+            raise ValueError(
+                f"construction must be 'dimension_major' or 'function_major' "
+                f"(got {construction!r})"
+            )
+        mode_sizes = [S.shape[0] for S in slices]
 
         if low_rank:
-            # Build the feature tensor directly in compressed TT form. The naive
-            # tensor is  Theta[j_0..j_{D-1}, m] = prod_d B[j_d, d, m]  with the
-            # time index m carried on every bond (rank M). Here we carry a
-            # compressed state C (shape r x M) and, at each mode, expand by the
-            # next factor and re-compress with an SVD, so the bonds shrink to the
-            # true ranks. Only the final (time) core scales with M.
-            #
-            # Best when used with relatively high M
+            # Build directly in compressed form
             cores = []
             C = np.ones((1, M))                              # carry: (r, M)
-            for d in range(D):
-                r = C.shape[0]
-                # E[(a,j), m] = C[a, m] * B[j, d, m]
-                E = (C[:, None, :] * B[:, d, :][None, :, :]).reshape(r * J, M)
-                if d < D - 1:
-                    # interior mode: the bond rank is the exact algebraic rank
-                    # J^(d+1) (no truncation possible), so a full SVD is fine.
+            for i, S in enumerate(slices):
+                r, Ji = C.shape[0], mode_sizes[i]
+                # E[(a,j), m] = C[a, m] * S[j, m]
+                E = (C[:, None, :] * S[None, :, :]).reshape(r * Ji, M)
+                if i < len(slices) - 1:
+                    # interior mode: the bond rank is exact, so nothing can be
+                    # truncated and a full SVD is fine
                     U, s, Vt = np.linalg.svd(E, full_matrices=False)
                     s0 = s[0] if s.size and s[0] > 0 else 1.0
                     tol = (threshold if threshold > 0 else 1e-13) * s0
                     k = max(int(np.sum(s > tol)), 1)
-                    cores.append(U[:, :k].reshape(r, J, 1, k))
+                    cores.append(U[:, :k].reshape(r, Ji, 1, k))
                     C = s[:k, None] * Vt[:k, :]              # new carry: (k, M)
                 else:
-                    # last mode: convolve with the test function FIRST (weak
-                    # form). Convolution projects onto the smooth test-function
-                    # subspace, which sharply drops the rank (e.g. 3104 -> ~390
-                    # for L96 J=5,D=5), so a single TRUNCATED SVD of the
-                    # convolved matrix yields both the last feature core and the
-                    # time core. The naive path instead took a full-rank SVD of
-                    # E here and a second SVD to truncate the time bond -- two
-                    # ~O(J^D * M) dense SVDs; this fuses + truncates them into
-                    # one cheap solve (the dominant construction cost). It also
-                    # truncates the time-core bond to the effective rank, which
-                    # the naive path left loose (near-null directions there get
-                    # amplified by 1/sigma in the TT_PI pseudoinverse).
-                    Ec = E if phi is None else correlate(
-                        E, np.expand_dims(phi, axis=0), mode='valid')   # (rJ, Mp)
-                    U, s, Vt = _truncated_svd(Ec, threshold)
-                    cores.append(U.reshape(r, J, 1, U.shape[1]))        # feature core
+                    # convolve with the test function first, which sharply drops
+                    # the rank, then extract the last two cores
+                    Ec = E if phi is None else \
+                        correlate(E.reshape(E.shape[0], n_traj, M // n_traj),
+                            phi[None, None, :], mode='valid').reshape(
+                                E.shape[0], -1
+                            )                                  # (rJ, Mp)
+                    U, s, Vt = truncated_svd(Ec, threshold)
+                    cores.append(U.reshape(r, Ji, 1, U.shape[1]))       # feature core
                     cores.append((s[:, None] * Vt).reshape(            # time core
                         U.shape[1], Ec.shape[1], 1, 1))
 
             super().__init__(cores, threshold=0)
+        elif construction != 'dimension_major':
+            # the dense path builds uniform (M, J, 1, M) cores directly, and is
+            # only implemented for the default construction
+            raise NotImplementedError(
+                "construction='function_major' requires low_rank=True"
+            )
         else:
-            # original dense construction: O(D J M^2) memory (diagonal cores)
+            # Original construction
             cores = [np.zeros([1, J, 1, M])] + \
                     [np.zeros([M, J, 1, M]) for _ in range(D - 1)]
             for j in range(J):
@@ -217,24 +179,27 @@ class feature_tensor(TT):
             if phi is None:
                 cores.append(np.eye(M).reshape(M, M, 1, 1))
             else:
-                Iphi = correlate(np.eye(M), np.expand_dims(phi, axis=0),
+                # per-trajectory convolution operator, repeated block-diagonally
+                # so that no column mixes two trajectories
+                Iphi = correlate(np.eye(m_traj), np.expand_dims(phi, axis=0),
                                  mode='valid')
+                if n_traj > 1:
+                    Iphi = np.kron(np.eye(n_traj), Iphi)
                 cores.append(Iphi.reshape(M, Iphi.shape[1], 1, 1))
             super().__init__(cores, threshold=threshold)
 
         # other metadata
         self.verbose = verbose
-        self.Mp = M - len(phi) + 1 if phi is not None else M # final mode
-        self.feature_norms = norms
-        self.supp_indices = [np.arange(J) for _ in range(D)]
+        self.n_traj = n_traj
+        self.Mp = n_traj * (m_traj - len(phi) + 1) if phi is not None else M # final mode
+        self.construction = construction
+        self.supp_indices = [np.arange(sz) for sz in mode_sizes]
         self.threshold = threshold
-        self.slice_scaling = slice_scaling
         
     def all_active_features(self):
         """
         Active candidate functions in each dimension, as indices into the
-        original candidate-function list. Use this to recover features
-        after TT_STLS.
+        original candidate-function list.
 
         Returns
         -------
@@ -264,10 +229,9 @@ class feature_tensor(TT):
         """
         Per-mode importance weights for a coefficient tensor.
 
-        These are the quantities thresholded inside coarse_supp. They depend
-        only on the support and the regression target (through W), not on the
-        threshold lamb, so they can be cached per support and reused across
-        the lambda sweep.
+        These are the quantities thresholded by threshold_weights. They depend
+        only on the support and on W, not on the threshold, so they can be
+        cached per support and reused across a lambda sweep.
 
         Parameters
         ----------
@@ -340,36 +304,14 @@ class feature_tensor(TT):
                 print(f"  d={d}: weights={w}, LB={lamb:.3e}")
             supp[d] = keep
         return supp
-
-    def coarse_supp(self, W, lamb):
-        """
-        Coarse support of W at threshold lamb.
-
-        Convenience wrapper that computes the (lamb-independent) weights and
-        thresholds them in one call. Prefer compute_weights / threshold_weights
-        directly when caching weights across lambda values.
-
-        Parameters
-        ----------
-        W : TT
-            Coefficient tensor estimate.
-        lamb : float
-            Threshold.
-
-        Returns
-        -------
-        supp : list of np.ndarray
-            Per-dimension boolean support masks.
-        """
-        return self.threshold_weights(self.compute_weights(W), lamb)
                 
     def apply_supp(self, supp):
         """
         Reduce the feature tensor to the features in supp.
 
-        Slices the feature axis of each feature core, updates the index map
-        (supp_indices) to keep only surviving features, and updates the
-        corresponding row dimensions. The weak/strong core is left untouched.
+        Slices the feature axis of each feature core, and updates the index map
+        (supp_indices) and the row dimensions. The weak/strong core is left
+        untouched.
 
         Parameters
         ----------
@@ -382,10 +324,10 @@ class feature_tensor(TT):
 
         for d in range(D):
 
-            # slce feature axis to only contain features in support
-            cores_prime[d] = self.cores[d][:, supp[d], :, :]  
+            # slice feature axis to only contain features in support
+            cores_prime[d] = self.cores[d][:, supp[d], :, :]
 
-            # update index map: keep only suriving indices
+            # update index map: keep only surviving indices
             self.supp_indices[d] = self.supp_indices[d][supp[d]]
 
             # update row dim to new number of features
@@ -393,43 +335,23 @@ class feature_tensor(TT):
         
         self.cores = cores_prime
 
-
-    def TT_PI_factors(self):
-        """
-        SVD factors of the feature-tensor pseudoinverse.
-
-        These (U, Sigma, V) depend only on the feature tensor, not on the
-        regression target, so they can be computed once and reused across the
-        D per-dimension targets (the SVD is the cost of TT_PI). Pass the result
-        to TT_PI(x, factors=...).
-
-        Returns
-        -------
-        factors : tuple (TT, np.ndarray, TT)
-            Left factor, singular values, right factor at the split before the
-            weak/strong core.
-        """
-        D = self.order - 1
-        return self.svd(D, threshold=self.threshold,
-                        ortho_l=True, ortho_r=True, overwrite=False)
-
     def TT_PI(self, x, factors=None):
         """
         TT pseudoinverse regression.
 
         Form the pseudoinverse of the feature tensor (optionally truncating
-        its constituent SVDs by `threshold`), regress against x, and collapse
-        the result into a coefficient tensor.
+        its constituent SVDs by self.threshold), regress against x, and
+        collapse the result into a coefficient tensor.
 
         Parameters
         ----------
         x : np.ndarray
             Target values to regress against, length self.Mp.
         factors : tuple (TT, np.ndarray, TT), optional
-            Precomputed pseudoinverse SVD factors from TT_PI_factors(). When
-            given, the (target-independent) global SVD is skipped and reused.
-            The factor cores are copied here so the returned W can be mutated
-            (e.g. unscale) without corrupting the shared factors.
+            Precomputed pseudoinverse SVD factors. When given, the
+            target-independent global SVD is skipped and reused. The factor
+            cores are copied, so the returned W can be mutated without
+            corrupting the shared factors.
 
         Returns
         -------
@@ -455,7 +377,6 @@ class feature_tensor(TT):
             Wcores = U.cores + V.cores
         else:
             U, Sigma, V = factors
-            # copy: W's cores are mutated downstream (unscale), the factors are shared
             Wcores = [c.copy() for c in U.cores] + [c.copy() for c in V.cores]
         Wcores[D] = np.tensordot(np.diag(np.reciprocal(Sigma)),
                                  Wcores[D], axes=(1,0))
@@ -477,7 +398,7 @@ class feature_tensor(TT):
         Repeatedly estimate the coefficient tensor (TT_PI), threshold it to a
         coarse support, and reduce the feature tensor, until the support stops
         shrinking (or collapses to a single feature). The final estimate is
-        recomputed on the converged support and unscaled.
+        recomputed on the converged support.
 
         Parameters
         ----------
@@ -485,8 +406,6 @@ class feature_tensor(TT):
             Target values to regress against.
         lamb : float
             Thresholding parameter.
-        threshold : float
-            SVD truncation parameter passed to TT_PI.
         weight_cache : dict, optional
             Maps a support key (see support_key) to its precomputed weights,
             so the weights for a given support are computed only once across a
@@ -495,8 +414,7 @@ class feature_tensor(TT):
         Returns
         -------
         W : TT
-            Coefficient tensor estimate on the converged support, unscaled by
-            the feature norms.
+            Coefficient tensor estimate on the converged support.
         """
         if weight_cache is None:
             weight_cache = {}
@@ -536,7 +454,7 @@ class feature_tensor(TT):
                 print(f'Support size: {self.supp_size(supp)}')
                 print('----------------')
 
-            # supp is montonically decreasing. So only need to compare to size of previous support
+            # supp is monotonically decreasing, so comparing sizes suffices
             if self.supp_size(supp) == self.supp_size(supp_prev) or \
                 self.supp_size(supp) == 1:
                 break
@@ -546,35 +464,8 @@ class feature_tensor(TT):
             print(f'Finished TT-STLS in {i} iterations, with final support size {self.supp_size(supp)}')
             print(f'Time elapsed: {time() - st:.2f} seconds')
 
-        # Recompute W on converged support and unscale
+        # Recompute W on converged support
         W = self.TT_PI(x)
-        if self.slice_scaling: W = self.unscale(W)
-
-        return W
-    
-    def unscale(self, W):
-        """
-        Undo the per-feature normalization of a coefficient estimate.
-
-        Each feature slice was scaled by its norm during construction; this
-        rescales the corresponding coefficient slices back, using the index
-        map to recover the original candidate function for each survivor.
-
-        Parameters
-        ----------
-        W : TT
-            Coefficient tensor estimate with normalized feature scaling.
-
-        Returns
-        -------
-        W : TT
-            The same tensor with the normalization undone.
-        """
-        for d in range(W.order):
-            for j in range(W.row_dims[d]):
-                orig_j = self.supp_indices[d][j]
-                W.cores[d][:,j,:,:] /= self.feature_norms[orig_j,d]
-
         return W
 
     def supp_size(self, supp):

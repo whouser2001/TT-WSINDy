@@ -9,13 +9,9 @@ from feature_tensor import feature_tensor
 import ttutils as utils
 from time import time
 
-
 def tensor_loss(W, W0prod, Theta, supp_ratio, W0Theta_norm):
     """
     MSTLS loss for a tensor-train coefficient estimate.
-
-    Penalizes the change in fit relative to the non-thresholded estimate,
-    while rewarding a smaller support.
 
     Parameters
     ----------
@@ -23,7 +19,7 @@ def tensor_loss(W, W0prod, Theta, supp_ratio, W0Theta_norm):
         Current coefficient estimate, embedded to full size [J]^D.
     W0prod : np.ndarray
         Non-thresholded estimate contracted with Theta, W_contract(W0, Theta).
-        Precomputed once (it is fixed across the lambda sweep) and passed in.
+        Fixed across the lambda sweep, so precomputed once and passed in.
     Theta : TT
         Feature tensor being regressed against, [J]^D x Mp.
     supp_ratio : float
@@ -38,15 +34,11 @@ def tensor_loss(W, W0prod, Theta, supp_ratio, W0Theta_norm):
     diff_norm : float
         The relative fit-difference term on its own.
     """
-    # W contracted with Theta, minus W0 contracted with Theta.
-    # Note: W - W0 is NOT elementwise subtraction on a TT, so
-    # (W - W0) x Theta would not give the intended difference.
     Wprod = utils.W_contract(W, Theta)
     s1 = np.linalg.norm(Wprod - W0prod)/W0Theta_norm
     return s1 + supp_ratio, s1
 
-def TT_MSTLS(Theta, x, lambs, total_size, verbose=False, one_pass=False,
-             pi_factors=None, slice_scaling=False):
+def TT_MSTLS(Theta, x, lambs, total_size, verbose=False, one_pass=False, pi_factors=None):
     """
     Tensor-train MSTLS (TT-MSTLS).
 
@@ -67,13 +59,10 @@ def TT_MSTLS(Theta, x, lambs, total_size, verbose=False, one_pass=False,
     verbose : bool
         If True, print per-threshold diagnostics.
     one_pass : bool
-        If True, only performs a single regression/sparsification step.
+        If True, perform a single regression/sparsification step only.
     pi_factors : tuple, optional
-        Precomputed pseudoinverse SVD factors (from Theta.TT_PI_factors()) for
-        the one_pass solve. The factors depend only on Theta, not x, so when
-        TT-WSINDy regresses the same feature tensor against each of the D
-        targets they can be computed once and shared, skipping the (dominant)
-        global SVD on every dimension. Ignored by the iterative path.
+        Precomputed pseudoinverse SVD factors for the one_pass solve. Ignored
+        by the iterative path.
 
     Returns
     -------
@@ -86,13 +75,11 @@ def TT_MSTLS(Theta, x, lambs, total_size, verbose=False, one_pass=False,
         Surviving candidate-function indices per dimension.
     """
 
-    # single non-thresholded solve: weights (from the SCALED estimate, as in
-    # TT_STLS) and the unscaled reference W0 used by the loss. One TT_PI total.
-    W_scaled = Theta.TT_PI(x, factors=pi_factors) if one_pass else Theta.TT_PI(x)
+    W0 = Theta.TT_PI(x, factors=pi_factors) if one_pass else Theta.TT_PI(x)
     if one_pass:
-        weights = Theta.compute_weights(W_scaled)
-    W0 = Theta.unscale(W_scaled) if slice_scaling else W_scaled      # unscale in place -> reference estimate
-    # W0prod is fixed across the lambda sweep -> compute once, reuse in the loss
+        weights = Theta.compute_weights(W0)
+
+    # Compute W0prod once, reuse in the loss
     W0prod = utils.W_contract(W0, Theta)
     W0Theta_norm = np.linalg.norm(W0prod)
 
@@ -104,11 +91,7 @@ def TT_MSTLS(Theta, x, lambs, total_size, verbose=False, one_pass=False,
     Theta.verbose = False
 
     if one_pass:
-        # ---- single-solve coarse selection ----
-        # Sweep lambda, thresholding the cached weights into a candidate product
-        # support and scoring it by masking W0 to that support (no re-solve).
-        # Keep the lowest-loss support and reduce Theta to it once, so the fine
-        # pass sees the reduction.
+
         best_mask = None
         for i, lamb in enumerate(lambs):
 
@@ -133,12 +116,12 @@ def TT_MSTLS(Theta, x, lambs, total_size, verbose=False, one_pass=False,
                 print(f'lambda = {lamb}, loss = {loss}')
                 print(f'min_loss = {min_loss}')
 
-        # reduce Theta to the winning support so the fine pass sees it
+        # reduce Theta to the winning support
         Theta.apply_supp(best_mask)
         suppStar = Theta.all_active_features()
         return Theta, Wstar, suppStar
 
-    # ---- iterative TT-STLS coarse selection ----
+    # Iterative TT-STLS
     weight_cache = {}
     for i in range(len(lambs)):
 
@@ -180,10 +163,6 @@ def STLS(G, b, lamb, w_LS):
     """
     Sequential thresholding least squares (STLS) with index tracking.
 
-    Iteratively keeps coefficients whose magnitude falls within a per-column
-    band [LB, UB] and re-solves on the surviving columns until the support
-    stabilizes.
-
     Parameters
     ----------
     G : np.ndarray
@@ -209,9 +188,9 @@ def STLS(G, b, lamb, w_LS):
 
     col_norms = la.norm(G, axis=0)
     col_norms[col_norms == 0] = 1.0                 # guard against zero-norm columns
-    bound = la.norm(b) / col_norms                  # ||b|| / ||G_k|| per column
+    bound = la.norm(b) / col_norms
     LB = lamb * np.maximum(1.0, bound)              # per-column lower band
-    UB = (1.0 / lamb) * np.minimum(1.0, bound)      # per-column upper band   
+    UB = (1.0 / lamb) * np.minimum(1.0, bound)      # per-column upper band
 
     w = np.asarray(w_LS, dtype=float).copy()
     active_prev = None
@@ -236,7 +215,7 @@ def MSTLS(G, b, lambs, verbose=False):
     Flat (matrix) MSTLS on the reduced library from TT-MSTLS.
 
     Sweep over threshold values, run STLS at each, and keep the support with
-    the lowest loss (relative fit difference plus support ratio).
+    the lowest loss.
 
     Parameters
     ----------
@@ -256,7 +235,7 @@ def MSTLS(G, b, lambs, verbose=False):
     suppStar : np.ndarray
         Indices of the surviving columns into G.
     """
-    Jtilde = G.shape[1] # G : M' x prod(Jd)
+    Jtilde = G.shape[1]
     w0, *_ = la.lstsq(G, b, rcond=None)
     Gw0 = G @ w0
     Gw0_norm = la.norm(Gw0)
@@ -271,11 +250,9 @@ def MSTLS(G, b, lambs, verbose=False):
         wLa, GLa, suppLa = STLS(G, b, lamb, w0)
 
         if wLa is None:
-            loss = np.inf   # empty supprt
+            loss = np.inf   # empty support
         else:
             GwLa = GLa @ wLa
-
-            # Compute loss
             diffnorm = la.norm(GwLa - Gw0)/Gw0_norm
             suppratio = len(suppLa)/Jtilde
             loss = diffnorm + suppratio

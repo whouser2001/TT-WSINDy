@@ -8,7 +8,6 @@ import numpy as np
 import copy
 from scipy.signal import correlate
 from time import time
-from scikit_tt import tensor_train
 import test_function
 from feature_tensor import feature_tensor
 import sparsification
@@ -21,14 +20,14 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
                 verbosity=0,
                 low_rank=False,
                 one_pass=False,
-                slice_scaling=False):
+                timings=None):
     """
     TT-WSINDy.
- 
+
     Discover the governing equations of a dynamical system from data using
     weak-form SINDy with tensor-train sparsification: a coarse TT-MSTLS pass
     per dimension, followed by a fine matrix MSTLS solve.
- 
+
     Parameters
     ----------
     X : np.ndarray
@@ -46,18 +45,18 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
         Currently supported:
             1.  name : piecewise_polynomial
                 r : float
-                    real number in (0, 1] giving the fraction of the time
-                    interval the test function spans
+                    Fraction in (0, 1] of the time interval the test function
+                    spans.
                 p : int
-                    degree of the polynomial
+                    Degree of the polynomial.
                 o : int
-                    order of the ODE to be discovered. An oth-order ODE
+                    Order of the ODE to be discovered. An oth-order ODE
                     requires 'dphi' to be the oth-order derivative.
             2.  name : manual
                 phi : np.array
-                    discretized phi data
+                    Discretized phi data.
                 dphi: np.array
-                    discretized phi derivative data
+                    Discretized phi derivative data.
     loss : str
         Loss function. Currently supported:
             1. name : default
@@ -72,13 +71,18 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
             2 : additionally print weights, support, and loss at every
                 tested lambda (debug)
     low_rank : bool
-        If true, builds feature tensor directly in compressed
-        form by a left-to-right SVD sweep over a small "carry" matrix.
-        Best when M >> J^D
+        If True, build the feature tensor directly in compressed form.
+        Preferred when M is large.
     one_pass : bool
-        If true, performs TT-STLS non-iteratively; only performing
-        a single regression/sparsification step.
- 
+        If True, perform TT-STLS non-iteratively, as a single
+        regression/sparsification step.
+    timings : dict, optional
+        If given, a per-stage wall-clock breakdown of the run is written into
+        it, under the keys 'feature_tensor', 'pi_factors', 'tt_mstls',
+        'mstls', 'library_rebuild' and 'total', along with 'ranks', the
+        feature tensor's TT bond ranks as built. The stages sum to 'total' up
+        to small unattributed remainders.
+
     Returns
     -------
     W : list of np.ndarray
@@ -115,35 +119,38 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
         )
     elif testfn[0] == 'manual':
         phi, dphi = testfn[1:]
-    elif testfn[0] == 'Cinfty_bump':
-        return NotImplementedError
     else:
-        return NotImplementedError
+        return NotImplementedError('Test function string ' \
+        'not supported. Enter one of piecewise_polynomial, manual.')
     
+    ft_st = time()
     Theta = feature_tensor(X, f, 
                             threshold=threshold,
                             phi=phi,
                             verbose=debug,
                             low_rank=low_rank)
+    ft_time = time() - ft_st
     
     # compute the weak-form left-hand side
     phi = np.expand_dims(phi, axis=0)
-    if D > 1: dphi = np.expand_dims(dphi,axis=0)
+    if D > 1: dphi = np.expand_dims(dphi, axis=0)
     Y = -1*correlate(X, dphi, mode='valid').transpose()    # (Mp, D)
 
     # store per-dimension results
-    W = []
-    supp = []
+    Ws = []
+    supps = []
     feature_maps = []
     coarse_supps = []
 
-    # the one_pass coarse pass solves the SAME feature tensor against each of
-    # the D targets, so the pseudoinverse SVD (the dominant cost) is computed
-    # once here and reused across dimensions
-    pi_factors = Theta.TT_PI_factors() if one_pass else None
+    # If one_pass, compute the single TT SVD here
+    pi_st = time()
+    pi_factors = Theta.svd(D, threshold=Theta.threshold,
+                        ortho_l=True, ortho_r=True, overwrite=False) if one_pass else None
+    pi_time = time() - pi_st
 
     tt_mstls_time = 0
     mstls_time = 0
+    rebuild_time = 0
     for d in range(D):
 
         # coarse pass: TT-MSTLS
@@ -165,6 +172,7 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
             print(f'coarse support: {suppStar}')
             print('Beginning flat MSTLS')
 
+        rebuild_st = time()
         coarse_supp = Theta_star.all_active_features()
         coarse_supps.append(coarse_supp)
         feature_map = list(itertools.product(*coarse_supp))
@@ -192,6 +200,7 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
             G[k, :] = gk
 
         G = correlate(G, phi, mode='valid').transpose()
+        rebuild_time += time() - rebuild_st
 
         # fine pass: MSTLS
         mstls_st = time()
@@ -200,14 +209,21 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
         )
         mstls_end = time()
 
-        W.append(wStar)
-        supp.append(suppStar)
+        Ws.append(wStar)
+        supps.append(suppStar)
         feature_maps.append(feature_map)
         
         tt_mstls_time += tt_mstls_end - tt_mstls_st
         mstls_time += mstls_end - mstls_st
 
     ttwsindy_time = time() - st
+
+    if timings is not None:
+        timings.update(feature_tensor=ft_time, pi_factors=pi_time,
+                       tt_mstls=tt_mstls_time, mstls=mstls_time,
+                       library_rebuild=rebuild_time, total=ttwsindy_time,
+                       ranks=list(Theta.ranks))
+
     if verbose:
         print('------------------')
         print('TT-WSINDy complete.')
@@ -216,4 +232,4 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
         print(f'MSTLS runtime: {mstls_time}')
         print('------------------')
 
-    return W, supp, feature_maps, ttwsindy_time, tt_mstls_time, mstls_time, coarse_supps
+    return Ws, supps, feature_maps, ttwsindy_time, tt_mstls_time, mstls_time, coarse_supps
