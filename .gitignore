@@ -1,6 +1,0 @@
-.claude
-.vscode
-.gitignore
-/experiments/__pycache__/
-/experiments/results/
-/TT-WSINDy/__pycache__/
