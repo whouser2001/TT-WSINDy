@@ -8,11 +8,11 @@ from scikit_tt.tensor_train import TT
 
 def W_contract(W, Theta):
     """
-    Helper method to fully contract a coefficient estimate W
-    into the feature tensor Theta, to produce a vector x in R^Mp.
+    Fully contract a coefficient estimate W into the feature tensor Theta,
+    producing a vector x in R^Mp.
 
-    Superior to calling W.tensordot directly, as that method
-    stores prohibitively large (O(M^4)) intermediate tensors
+    Preferred over W.tensordot, which stores prohibitively large O(M^4)
+    intermediates.
 
     Parameters
     ----------
@@ -42,8 +42,8 @@ def W_contract(W, Theta):
 
 def embed_full(W, active_features, full_dims):
     """
-    Helper method to embed a reduced TT coefficient tensor back into the 
-    full feature space. For compatibility with W0 in tensor loss function
+    Embed a reduced TT coefficient tensor back into the full feature space,
+    for compatibility with W0 in the tensor loss function.
 
     Parameters
     ----------
@@ -52,9 +52,9 @@ def embed_full(W, active_features, full_dims):
         (r_d, len(active_features[d]), 1, r_{d+1}).
     active_features : list of np.array
         active_features[d] holds the original feature indices surviving in
-        dimension d (i.e. feature_tensor.all_active_features()).
+        dimension d, as returned by feature_tensor.all_active_features().
     full_dims : list of int
-        Original number of features per dimension (e.g. W0.row_dims).
+        Original number of features per dimension.
 
     Returns
     -------
@@ -92,10 +92,7 @@ def mask_coeffs(W, supp):
     Restrict a full-support coefficient TT to a product support by zeroing the
     feature slices that fall outside the per-dimension masks.
 
-    Zeroing feature slice j in dimension d kills every contraction term that
-    uses feature j in that dimension, so the result equals W on the product
-    support (j_0,...,j_{D-1} with each j_d kept) and 0 elsewhere. Used by
-    one-pass TT-MSTLS to score a candidate support without re-solving.
+    Used by one-pass TT-MSTLS to score a candidate support without re-solving.
 
     Parameters
     ----------
@@ -118,36 +115,34 @@ def mask_coeffs(W, supp):
 
 def truncated_svd(A, threshold, small=700, n_oversamples=12, n_iter=2):
     """
-    Thin SVD keeping the singular triplets with s > tol (= rel*s[0]), where
-    rel = threshold (or 1e-13 if threshold==0).
+    Thin SVD keeping the singular triplets with s > rel*s[0], where
+    rel = threshold (or 1e-13 if threshold == 0).
 
-    For a tall/wide matrix whose effective rank is far below min(A.shape) -- as
-    happens at the weak feature tensor's time-core bond, where convolving with
-    the test function collapses the rank -- a full SVD wastes almost all its
-    work. This uses a randomized range finder [1] with an adaptive target rank.
+    When the effective rank is far below min(A.shape), a full SVD wastes
+    almost all of its work, so a randomized range finder [1] with an adaptive
+    target rank is used instead.
 
     Parameters
     ----------
     A : np.array
-        Matrix to be SVDed
+        Matrix to be SVDed.
     threshold : float
-        SVD thresholding parameter
+        SVD thresholding parameter.
     small : int
-        Rough size at which full SVD is computationally preferable
+        Rough size at which a full SVD is computationally preferable.
     n_oversamples : int
-        Small number of Monte Carlo oversamples. Drastically mproves expected 
-        accuracy of the SVD.
+        Number of Monte Carlo oversamples.
     n_iter : int
         Number of QR iterations per rank searched over.
-    
-    Returns 
+
+    Returns
     -------
     U : np.array
-        Left-orthonormal columns
+        Left-orthonormal columns.
     s : np.array
-        diagonal entries of Sigma
+        Diagonal entries of Sigma.
     Vt : np.array
-        Right-orthonormal columns
+        Right-orthonormal columns.
 
     References
     ----------

@@ -1,12 +1,5 @@
 """
-Weak form (TT-WSINDy) vs. strong form (MANDy) coefficient accuracy on Chua.
-
-Chua's circuit is first order, so the test function carries one derivative
-(order 1) and the strong form uses a central first difference. Its nonlinearity
-g(z) = d_1 z + d_2 z|z| puts two candidate functions on the SAME state
-variable, which the default dimension-major library cannot express, so the
-feature tensor is built with construction='function_major' -- see the note
-above true_coeffs.
+Weak form (TT-WSINDy) vs. strong form (MANDy) coefficient accuracy on Chua's circuit.
 """
 import os, sys
 sys.path.insert(0, '.')
@@ -25,12 +18,10 @@ alpha = 10
 beta = 14.87
 delta = (-8/7, 4/63)
 
-# Tight tolerances so the integrator is never what limits MANDy: the point of
-# the comparison is the O(dt^2) error of the finite-difference stencil.
 RTOL = ATOL = 1e-12
 
 def chua(x,t):
-    """ Chua's ciruit with g(z) = d_1z + d_2z|z|"""
+    """Chua's circuit."""
     return [
         alpha*(x[1] - x[0] - delta[0]*x[0] - delta[1]*x[0]*np.abs(x[0])),
         x[0] - x[1] + x[2],
@@ -48,8 +39,7 @@ def _tensor_shape(D, J):
 def true_coeffs(D, J):
     """Exact coefficient matrix of Chua's right-hand side, per output dim.
 
-    Reads the module-level alpha, beta, delta, exactly as chua() does; Chua
-    has no forcing parameter.
+    Reads the module-level alpha, beta and delta, as chua() does.
 
     Parameters
     ----------
@@ -62,14 +52,13 @@ def true_coeffs(D, J):
     -------
     Ws : list of ndarray
         Ws[i] is the (D+1) x (D+1) coefficient matrix of x_i's equation, with
-        Ws[i][a, b] the coefficient of x_a |x_b|. Index D means that function is
-        absent, so Ws[i][a, D] multiplies a bare x_a, Ws[i][D, b] a bare |x_b|,
-        and Ws[i][D, D] the constant. Seven entries are nonzero in total.
+        Ws[i][a, b] the coefficient of x_a |x_b|. Index D means that function
+        is absent.
 
     Raises
     ------
     ValueError
-        If D != 3, or if J != 3 (this is written for f = {1, x, |x|}).
+        If D != 3, or if J != 3.
     """
     if D != 3:
         raise ValueError(f"Chua's circuit is 3-dimensional, so D must be 3 (got D={D})")
@@ -82,11 +71,11 @@ def true_coeffs(D, J):
     A = D                      # the "function is absent" slot
     # (coefficient, dimension for x, dimension for |x|) per term, per equation
     equations = [
-        [(-alpha * (1.0 + d1), 0, A),   # -alpha (1 + d_1) x_1
-         (alpha,               1, A),   # +alpha x_2
-         (-alpha * d2,         0, 0)],  # -alpha d_2 x_1|x_1|
-        [(1.0, 0, A), (-1.0, 1, A), (1.0, 2, A)],           # x_1 - x_2 + x_3
-        [(-beta, 1, A)],                                    # -beta x_2
+        [(-alpha * (1.0 + d1), 0, A),
+         (alpha,               1, A),
+         (-alpha * d2,         0, 0)],
+        [(1.0, 0, A), (-1.0, 1, A), (1.0, 2, A)],
+        [(-beta, 1, A)],
     ]
 
     Ws = []
@@ -101,20 +90,15 @@ def weak_coefficients(X, f, t0, tM, D, J,
                       r_frac=1.0 / 60.0, degree=16):
     """TT-WSINDy (weak form) coefficient tensors, one row per output dim.
 
-    Chua is first order, so one integration by parts moves the single derivative
-    onto the test function: the LHS is -<x, phi'> = <x', phi> (test-function
-    order 1, so dphi is phi'), and the library is convolved with phi. No
-    derivative of the data is computed.
-
     X is (D, M): one trajectory of M snapshots spanning [t0, tM], with the
-    test-function radius a fraction r_frac of that span.
+    test-function radius a fraction r_frac of that span. Chua is first order,
+    so the test function is taken at order 1.
     """
     M = X.shape[1]
     phi, dphi = piecewise_polynomial((tM - t0) * r_frac, degree, t0, tM, M,
                                      order=1)
     Theta = feature_tensor(X, f, phi=phi, low_rank=True,
                            construction='function_major')
-    # the order-1 dphi equals phi', so -correlate(x, dphi) = -<x, phi'>
     Y = -1 * correlate(X, np.expand_dims(dphi, axis=0),
                        mode='valid').transpose()                # (Mp, D)
     return np.stack([xu.tt_pi_coeffs(Theta, Y[:, d], _tensor_shape(D, J))
@@ -123,9 +107,8 @@ def weak_coefficients(X, f, t0, tM, D, J,
 def strong_coefficients(X, f, dt, D, J):
     """MANDy (strong form) coefficient tensors, one row per output dim.
 
-    The LHS x' is a 3-point central finite difference of the trajectory; the
-    library is sampled pointwise at the interior snapshots where x' is defined.
-    X is (D, M), as in weak_coefficients.
+    The LHS x' is a 3-point central finite difference; the library is sampled
+    pointwise at the interior snapshots. X is (D, M), as in weak_coefficients.
     """
     Xdot = (X[:, 2:] - X[:, :-2]) / (2 * dt)                # (D, M-2)
     Theta = feature_tensor(X[:, 1:-1], f, phi=None, low_rank=True,
@@ -133,12 +116,10 @@ def strong_coefficients(X, f, dt, D, J):
     return np.stack([xu.tt_pi_coeffs(Theta, Xdot[d], _tensor_shape(D, J))
                      for d in range(D)])
 
-# -----
-# main
-# -----
+# Experiment
 if __name__ == '__main__':
 
-    # ----- parameters (the setup of Example 2.1: h = 0.01, t = 0, ..., 20) -----
+    # ----- parameters -----
     D = 3               # state dimension, fixed by the model
     M = 200000            # snapshots
     dt = 0.01           # snapshot spacing
@@ -150,13 +131,13 @@ if __name__ == '__main__':
 
     f = [lambda x: 1, lambda x: x, lambda x: np.abs(x)]
     J = len(f)
-    # function-major library: one label per NON-constant function, and the
-    # label function needs D to know which slots mean "absent"
+    # function-major library: one label per non-constant function; the label
+    # function needs D to know which slot means "absent"
     LABELS = ['x{}', '|x{}|']
     xu.check_labels(f, LABELS, function_major=True)
     label_fn = partial(xu.function_major_label, D=D)
 
-    t = np.arange(M) * dt          # exact spacing dt (linspace(0, M*dt, M) is not)
+    t = np.arange(M) * dt          # exact spacing dt
     t0, tM = t[0], t[-1]           # the plot title needs tM on both paths
 
     DATA = "results/weakvstrongformChua.txt"
@@ -230,15 +211,14 @@ if __name__ == '__main__':
                           f"r_frac={r_frac:.5f} n_trials={n_trials}\n"
                           "noise weak_mean weak_std strong_mean strong_std")
 
-    # the figure is drawn from DATA either way, so a rerun and a
-    # replot produce exactly the same plot
+    # the figure is always drawn from DATA, so a rerun and a replot agree
     if not os.path.exists(DATA):
         raise SystemExit(f"{DATA} not found -- set recompute_data = True and rerun")
     noise_levels, wm, ws, sm, ss = np.atleast_2d(np.loadtxt(DATA)).T
 
     # ----- plot -----
 
-    # mean +- one standard deviation over trials, joined into a line
+    # mean +- one standard deviation over trials
     ax = plt.figure(figsize=(7, 5)).gca()
     hw = ax.errorbar(noise_levels, wm, yerr=ws, marker='o', capsize=3,
                      color='C0', ls='-', label='TT-WSINDy (weak form)')

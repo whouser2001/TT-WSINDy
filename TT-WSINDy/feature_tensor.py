@@ -9,7 +9,7 @@ from ttutils import truncated_svd
 
 class feature_tensor(TT):
     """
-    Tensor train of feature cores from data and a list of candidate functions. 
+    Tensor train of feature cores from data and a list of candidate functions.
     Extends the TT (tensor train) class from scikit-tt.
 
     Methods
@@ -19,15 +19,14 @@ class feature_tensor(TT):
     support_key()
         Hashable key identifying the current support state.
     compute_weights(W)
-        Per-mode importance weights from a coefficient tensor
+        Per-mode importance weights from a coefficient tensor.
     threshold_weights(weights, lamb)
         Threshold cached weights into a support mask.
     apply_supp(supp)
         Reduce the feature tensor to the features in supp.
-    TT_PI(x, threshold)
-        TT pseudoinverse regression against x, with optional SVD
-        rank truncation.
-    TT_STLS(x, lamb, threshold, weight_cache)
+    TT_PI(x, factors)
+        TT pseudoinverse regression against x.
+    TT_STLS(x, lamb, weight_cache)
         Tensor-train sequential thresholding least squares.
     supp_size(supp)
         Size of the support induced by a mask.
@@ -39,9 +38,8 @@ class feature_tensor(TT):
         Parameters
         ----------
         X : np.ndarray
-            Raw data, shape D x M
-            With n_traj > 1, the columns hold n_traj equal-length
-            trajectories concatenated along time.
+            Raw data, shape D x M. With n_traj > 1, the columns hold n_traj
+            equal-length trajectories concatenated along time.
         f : list of callable
             Candidate functions fj : R -> R.
         threshold : float
@@ -53,32 +51,27 @@ class feature_tensor(TT):
         verbose : bool
             If True, print progress/debugging information.
         low_rank : bool
-            Performs a left-to-right SVD sweep over a small carry matrix,
-            which collapses ranks from M to their true values in-place.
-            Preferred for large M, and when the naive feature tensor
-            constructio is too large to be stored in memory.
+            Build the train directly in compressed form, by a left-to-right
+            SVD sweep over a small carry matrix. Preferred for large M, and
+            when the dense feature tensor does not fit in memory.
         n_traj : int
             Number of independent trajectories concatenated along the time
-            axis of X, each of length M / n_traj. The candidate functions
-            are evaluated pointwise, so only the weak-form convolution is
-            trajectory-aware: phi is correlated within each trajectory
-            separately, and no row of the final mode straddles a boundary.
+            axis of X, each of length M / n_traj. Only the weak-form
+            convolution is trajectory-aware: phi is correlated within each
+            trajectory separately, so no row of the final mode straddles a
+            boundary.
         construction : str
             Which set of candidates the train enumerates.
 
-            'dimension_major' (default, and the original behaviour): one mode
-            per state dimension, of size J. A candidate picks one function for
-            each dimension, giving prod_d f_{j_d}(x_d), so there are J^D of
-            them. Two functions can never act on the SAME dimension, so a term
-            like x|x| or sin(x)cos(x) is outside the span.
+            'dimension_major' (default): one mode per state dimension, of size
+            J, giving J^D candidates. Two functions can never act on the same
+            dimension.
 
-            'function_major': one mode per NON-CONSTANT candidate function, of
-            size D+1. Mode j picks which dimension f_j acts on, or leaves it
-            absent (the extra slot), giving (D+1)^(J-1) candidates. Because two
-            different functions may pick the same dimension, same-dimension
-            products such as Chua's x|x| ARE in the span; conversely a single
-            function cannot be reused, so x_a x_b is not. The two spans are
-            different, not nested. Requires low_rank=True.
+            'function_major': one mode per non-constant candidate function, of
+            size D+1, giving (D+1)^(J-1) candidates. Mode j picks the dimension
+            f_j acts on, or the extra slot meaning absent. Same-dimension
+            products are in the span; a single function cannot be reused.
+            Requires low_rank=True.
 
         Attributes (beyond those provided by TT)
         ----------
@@ -100,14 +93,14 @@ class feature_tensor(TT):
             Initialized to the identity (all J features active per dim).
         threshold : float
             Truncation parameter applied to the matrix SVDs in TT-PI.
-            threshold=0.0 computes pseudoinverses exactly.
 
         Raises
         ------
         ValueError
-            If the number of time points is not a multiple of n_traj.
+            If the number of time points is not a multiple of n_traj, or if an
+            invalid construction string is given.
         NotImplementedError
-            If an invalid construction string is given.
+            If construction='function_major' is used without low_rank.
         """
         J = len(f)
         D,self.snapshots = X.shape if X.ndim > 1 else (1,X.size)
@@ -146,9 +139,8 @@ class feature_tensor(TT):
                 # E[(a,j), m] = C[a, m] * S[j, m]
                 E = (C[:, None, :] * S[None, :, :]).reshape(r * Ji, M)
                 if i < len(slices) - 1:
-                    # interior mode: the bond rank is the exact algebraic rank
-                    # prod_{i' <= i} size_{i'} (no truncation possible), so a
-                    # full SVD is fine.
+                    # interior mode: the bond rank is exact, so nothing can be
+                    # truncated and a full SVD is fine
                     U, s, Vt = np.linalg.svd(E, full_matrices=False)
                     s0 = s[0] if s.size and s[0] > 0 else 1.0
                     tol = (threshold if threshold > 0 else 1e-13) * s0
@@ -156,14 +148,13 @@ class feature_tensor(TT):
                     cores.append(U[:, :k].reshape(r, Ji, 1, k))
                     C = s[:k, None] * Vt[:k, :]              # new carry: (k, M)
                 else:
-                    # Convolve with the test function first, which sharply drops the
-                    # rank, and extract both the last and second-to-last core.
+                    # convolve with the test function first, which sharply drops
+                    # the rank, then extract the last two cores
                     Ec = E if phi is None else \
                         correlate(E.reshape(E.shape[0], n_traj, M // n_traj),
                             phi[None, None, :], mode='valid').reshape(
                                 E.shape[0], -1
-                            )
-                        #_correlate_phi(E, phi, n_traj)                  # (rJ, Mp)
+                            )                                  # (rJ, Mp)
                     U, s, Vt = truncated_svd(Ec, threshold)
                     cores.append(U.reshape(r, Ji, 1, U.shape[1]))       # feature core
                     cores.append((s[:, None] * Vt).reshape(            # time core
@@ -171,8 +162,8 @@ class feature_tensor(TT):
 
             super().__init__(cores, threshold=0)
         elif construction != 'dimension_major':
-            # the dense path builds uniform (M, J, 1, M) cores from (X, f)
-            # directly; nothing in this repo needs it off the default construction
+            # the dense path builds uniform (M, J, 1, M) cores directly, and is
+            # only implemented for the default construction
             raise NotImplementedError(
                 "construction='function_major' requires low_rank=True"
             )
@@ -208,8 +199,7 @@ class feature_tensor(TT):
     def all_active_features(self):
         """
         Active candidate functions in each dimension, as indices into the
-        original candidate-function list. Use this to recover features
-        after TT_STLS.
+        original candidate-function list.
 
         Returns
         -------
@@ -239,10 +229,9 @@ class feature_tensor(TT):
         """
         Per-mode importance weights for a coefficient tensor.
 
-        These are the quantities thresholded inside coarse_supp. They depend
-        only on the support and the regression target (through W), not on the
-        threshold lamb, so they can be cached per support and reused across
-        the lambda sweep.
+        These are the quantities thresholded by threshold_weights. They depend
+        only on the support and on W, not on the threshold, so they can be
+        cached per support and reused across a lambda sweep.
 
         Parameters
         ----------
@@ -320,9 +309,9 @@ class feature_tensor(TT):
         """
         Reduce the feature tensor to the features in supp.
 
-        Slices the feature axis of each feature core, updates the index map
-        (supp_indices) to keep only surviving features, and updates the
-        corresponding row dimensions. The weak/strong core is left untouched.
+        Slices the feature axis of each feature core, and updates the index map
+        (supp_indices) and the row dimensions. The weak/strong core is left
+        untouched.
 
         Parameters
         ----------
@@ -335,10 +324,10 @@ class feature_tensor(TT):
 
         for d in range(D):
 
-            # slce feature axis to only contain features in support
-            cores_prime[d] = self.cores[d][:, supp[d], :, :]  
+            # slice feature axis to only contain features in support
+            cores_prime[d] = self.cores[d][:, supp[d], :, :]
 
-            # update index map: keep only suriving indices
+            # update index map: keep only surviving indices
             self.supp_indices[d] = self.supp_indices[d][supp[d]]
 
             # update row dim to new number of features
@@ -351,18 +340,18 @@ class feature_tensor(TT):
         TT pseudoinverse regression.
 
         Form the pseudoinverse of the feature tensor (optionally truncating
-        its constituent SVDs by `threshold`), regress against x, and collapse
-        the result into a coefficient tensor.
+        its constituent SVDs by self.threshold), regress against x, and
+        collapse the result into a coefficient tensor.
 
         Parameters
         ----------
         x : np.ndarray
             Target values to regress against, length self.Mp.
         factors : tuple (TT, np.ndarray, TT), optional
-            Precomputed pseudoinverse SVD factors. When
-            given, the (target-independent) global SVD is skipped and reused.
-            The factor cores are copied here so the returned W can be mutated
-            without corrupting the shared factors.
+            Precomputed pseudoinverse SVD factors. When given, the
+            target-independent global SVD is skipped and reused. The factor
+            cores are copied, so the returned W can be mutated without
+            corrupting the shared factors.
 
         Returns
         -------
@@ -417,8 +406,6 @@ class feature_tensor(TT):
             Target values to regress against.
         lamb : float
             Thresholding parameter.
-        threshold : float
-            SVD truncation parameter passed to TT_PI.
         weight_cache : dict, optional
             Maps a support key (see support_key) to its precomputed weights,
             so the weights for a given support are computed only once across a
@@ -467,7 +454,7 @@ class feature_tensor(TT):
                 print(f'Support size: {self.supp_size(supp)}')
                 print('----------------')
 
-            # supp is montonically decreasing. So only need to compare to size of previous support
+            # supp is monotonically decreasing, so comparing sizes suffices
             if self.supp_size(supp) == self.supp_size(supp_prev) or \
                 self.supp_size(supp) == 1:
                 break

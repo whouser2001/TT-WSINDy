@@ -1,12 +1,5 @@
 """
-Weak form (TT-WSINDy) vs. strong form (MANDy) coefficient accuracy on Kuramoto.
-
-Mirrors weakvstrongform_FPUT.py: both regressions pool n_traj trajectories,
-held as a (P, D, M) array and flattened to (D, P*M) for the library, with the
-test-function convolution (weak form) and the finite difference (strong form)
-taken one trajectory at a time so no row of the regression mixes trajectories.
-Kuramoto is FIRST order, so the test function carries one derivative (order 1)
-and the strong form uses a central first difference, as in the L96 script.
+Weak form (TT-WSINDy) vs. strong form (MANDy) coefficient accuracy on the Kuramoto model.
 """
 import os, sys
 sys.path.insert(0, '.')
@@ -20,19 +13,10 @@ from feature_tensor import feature_tensor
 from test_function import piecewise_polynomial
 import exputils as xu
 
-# Tight tolerances so the integrator is never what limits MANDy: the point of
-# the comparison is the O(dt^2) error of the finite-difference stencil, and an
-# integrator whose own local rule resembled that stencil would hide it.
 RTOL = ATOL = 1e-12
 
-
-# ---------------------------------------------------------------------------
-# Kuramoto model with distributed frequencies and a pinning term
-# ---------------------------------------------------------------------------
 def kuramoto(x, t, omega, K, h):
     """Kuramoto right-hand side for arbitrary d.
-
-        x_i' = omega_i + (K/d) sum_{j=1}^{d} sin(x_j - x_i) + h sin(x_i)
 
     Parameters
     ----------
@@ -53,10 +37,8 @@ def kuramoto(x, t, omega, K, h):
         Phase velocities.
     """
     S, C = np.sin(x), np.cos(x)
-    # Mean-field form of the coupling: expanding sin(x_j - x_i) gives
-    #     sum_j sin(x_j - x_i) = cos(x_i) sum_j sin(x_j) - sin(x_i) sum_j cos(x_j),
-    # which is O(d) rather than O(d^2) and exact for any d. The j = i term
-    # contributes sin(0) = 0 to both forms, so including it changes nothing.
+    # mean-field form of the coupling: exact for any d, and O(d) rather than
+    # O(d^2). The j = i term contributes nothing, so it is left in.
     return omega + (K / x.size) * (C * S.sum() - S * C.sum()) + h * S
 
 
@@ -70,34 +52,15 @@ def kuramoto_trajectory(d, M, dt=0.01, K=0.5, h=0.5, omega_min=-5.0,
                         omega_max=5.0, seed=0, omega=None):
     """Generate one Kuramoto trajectory of d oscillators, uniformly sampled.
 
-    Frequencies are EQUIDISTANT on [omega_min, omega_max] --
-    omega = linspace(omega_min, omega_max, d) -- unless an omega is supplied,
-    and the initial phases are drawn uniformly from (-pi, pi]. The frequencies
-    are therefore deterministic, and `seed` only sets the initial phases.
+    Frequencies are equidistant on [omega_min, omega_max] unless an omega is
+    supplied, and the initial phases are drawn uniformly from (-pi, pi].
 
-    Spreading the frequencies this wide keeps the phases from LOCKING, which is
-    what would destroy the {1, sin, cos} candidate library: once the phases lock
-    into one rigidly rotating cluster every sin(x_j - x_i) goes constant, the
-    trajectory collapses onto a near-1-D curve on the d-torus and the library
-    goes rank deficient -- the same trap as starting Lorenz-96 at its
-    equilibrium. For a uniform frequency spread on [-g, g] the asymptotic
-    locking threshold is K_c = 4g/pi (~6.4 at g=5), and finite size plus the
-    pinning term (h sin(x_i) pulls every phase toward pi) both push locking
-    below that, so keep K well under it.
-
-    The orbit also needs enough samples and a long enough span for the
-    {1, sin, cos} library to reach full rank. Equidistant frequencies are
-    commensurate -- every omega_i is an integer multiple of the spacing
-    2g/(d-1) -- so the orbit closes rather than filling the torus densely, and
-    it can in principle explore less than a random draw would. Measured at
-    d = 4, K = 2, h = 0.2, 4 x 10201 snapshots (T = 102): order parameter
-    r = 0.45 and the 81-candidate library is FULL rank, the same as the random
-    draw it replaced. Still worth checking the rank the experiment prints when
-    changing d, rather than assuming it.
-
-    With an odd d the grid contains omega = 0 exactly; keep h below the smallest
-    |omega_i| so that oscillator is not pinned outright (at d = 4 the smallest
-    is 5/3, at d = 5 it is 0).
+    The spread must be wide enough, and K small enough, to keep the phases
+    from locking, which would leave the {1, sin, cos} library rank deficient.
+    The orbit also needs enough samples and a long enough span to reach full
+    rank; check the rank the experiment prints when changing d. With an odd d
+    the grid contains omega = 0 exactly, so keep h below the smallest
+    |omega_i|.
 
     Parameters
     ----------
@@ -106,9 +69,8 @@ def kuramoto_trajectory(d, M, dt=0.01, K=0.5, h=0.5, omega_min=-5.0,
     M : int
         Number of recorded snapshots, spaced by dt.
     dt : float
-        Spacing between recorded snapshots. Not an integrator step -- odeint
-        adapts its own, which is what leaves the finite-difference LHS with a
-        genuine O(dt^2) truncation error.
+        Spacing between recorded snapshots, not an integrator step: odeint
+        adapts its own.
     K : float
         Coupling strength.
     h : float
@@ -126,13 +88,11 @@ def kuramoto_trajectory(d, M, dt=0.01, K=0.5, h=0.5, omega_min=-5.0,
     t : ndarray (M,)
         Sample times.
     X : ndarray (d, M)
-        Phases along the trajectory, UNWRAPPED: they grow without bound at
-        roughly the mean frequency per unit time. Do not reduce them mod 2 pi -- the
-        library {1, sin, cos} cannot tell the difference, but a 2 pi jump would
-        wreck both the finite difference and the weak-form convolution.
-        Because |X| grows with the time span, scaling a noise level by rms(X)
-        (as the FPUT and L96 scripts do) is meaningless here; the noise sweep
-        below perturbs the phases by an absolute number of radians.
+        Phases along the trajectory, unwrapped, so they grow without bound. Do
+        not reduce them mod 2 pi: a jump would wreck both the finite difference
+        and the weak-form convolution. Because |X| grows with the time span,
+        the noise sweep below perturbs the phases by an absolute number of
+        radians rather than scaling by rms(X).
     omega : ndarray (d,)
         The natural frequencies used, needed to state the true coefficients.
     """
@@ -148,10 +108,8 @@ def kuramoto_trajectories(d, M, n_traj, dt=0.01, K=0.5, h=0.5,
                           omega_min=-5.0, omega_max=5.0, seed=0):
     """Generate n_traj Kuramoto trajectories of one system, uniformly sampled.
 
-    The equidistant frequencies are shared by every trajectory; the
-    trajectories differ only in their random initial phases (drawn with
-    seed + p). Pooling trajectories with different omega would pool different
-    systems, so no single coefficient tensor could fit them.
+    The equidistant frequencies are shared by every trajectory, which differ
+    only in their random initial phases (drawn with seed + p).
 
     Returns
     -------
@@ -165,20 +123,6 @@ def kuramoto_trajectories(d, M, n_traj, dt=0.01, K=0.5, h=0.5,
                                  omega=omega) for p in range(n_traj)]
     return trajs[0][0], np.stack([X for _, X, _ in trajs]), omega
 
-
-# ---------------------------------------------------------------------------
-# True coefficient tensor (exact expansion of the Kuramoto right-hand side)
-# ---------------------------------------------------------------------------
-# With f = {1, sin, cos} the candidate index in a dimension picks which of the
-# three functions acts on that oscillator, so every term of the right-hand side
-# maps onto one entry of the (J,)*D coefficient tensor:
-#     x_i' = omega_i * 1
-#          + (K/d) sum_{j != i} [ sin(x_j) cos(x_i) - cos(x_j) sin(x_i) ]
-#          + h sin(x_i).
-# The j = i term is what makes this exact: sin(x_i) cos(x_i) is NOT in the span
-# of {1, sin, cos} (it is sin(2 x_i)/2), but it appears twice with opposite
-# signs and cancels analytically, so it never has to be represented. Hence the
-# sum below skips j = i rather than storing anything for it.
 def true_coeffs(D, J, omega, K, h):
     """Exact coefficient tensor of the Kuramoto right-hand side, per output dim.
 
@@ -197,10 +141,8 @@ def true_coeffs(D, J, omega, K, h):
     Returns
     -------
     Ws : list of ndarray
-        Ws[i] is the (J,)*D coefficient tensor of oscillator i's equation, i.e.
-        Ws[i][j_0, ..., j_{D-1}] is the coefficient of prod_d f[j_d](x_d) in
-        x_i'. Each equation has 2D nonzeros: omega_i, h, and +-K/D for each of
-        the D-1 other oscillators.
+        Ws[i] is the (J,)*D coefficient tensor of oscillator i's equation.
+        Each equation has 2D nonzeros.
 
     Raises
     ------
@@ -217,46 +159,36 @@ def true_coeffs(D, J, omega, K, h):
         W = np.zeros((J,) * D)
 
         idx = [0] * D
-        W[tuple(idx)] += omega[i]                   # omega_i * 1
+        W[tuple(idx)] += omega[i]                   # constant
 
         idx = [0] * D; idx[i] = 1
-        W[tuple(idx)] += h                          # h sin(x_i)
+        W[tuple(idx)] += h                          # pinning
 
         for j in range(D):
             if j == i:
                 continue                            # cancels analytically
             idx = [0] * D; idx[j] = 1; idx[i] = 2
-            W[tuple(idx)] += K / D                  # +(K/d) sin(x_j) cos(x_i)
+            W[tuple(idx)] += K / D                  # coupling
             idx = [0] * D; idx[j] = 2; idx[i] = 1
-            W[tuple(idx)] -= K / D                  # -(K/d) cos(x_j) sin(x_i)
+            W[tuple(idx)] -= K / D
 
         Ws.append(W)
     return Ws
 
-
-# ---------------------------------------------------------------------------
-# TT-PI regression -> dense, true-scale coefficient tensor
-# ---------------------------------------------------------------------------
 def weak_coefficients(Xs, f, t0, tM, D, J,
                       r_frac=1.0 / 60.0, degree=16):
     """TT-WSINDy (weak form) coefficient tensors, one row per output dim.
 
-    Kuramoto is first order, so one integration by parts moves the single
-    derivative onto the test function: the LHS is -<x, phi'> = <x', phi>
-    (test-function order 1, so dphi is phi'), and the library is convolved with
-    phi. No derivative of the data is computed.
-
-    Xs is (P, D, M): P trajectories, each of M snapshots spanning [t0, tM]. The
-    test-function radius is a fraction r_frac of that per-trajectory span, and
-    both the library and the LHS are convolved one trajectory at a time, so no
-    weak-form row straddles a trajectory boundary.
+    Xs is (P, D, M): P trajectories, each of M snapshots spanning [t0, tM].
+    The test-function radius is a fraction r_frac of that per-trajectory span,
+    and both the library and the LHS are convolved one trajectory at a time, so
+    no weak-form row straddles a trajectory boundary.
     """
     M = Xs.shape[2]
     phi, dphi = piecewise_polynomial((tM - t0) * r_frac, degree, t0, tM, M,
                                      order=1)
     Theta = feature_tensor(xu.flatten_trajectories(Xs), f, phi=phi, low_rank=True,
                            n_traj=Xs.shape[0])
-    # the order-1 dphi equals phi', so -correlate(x, dphi) = -<x, phi'>
     Y = -1 * np.concatenate(
         [correlate(X, np.expand_dims(dphi, axis=0), mode='valid') for X in Xs],
         axis=1).transpose()                                     # (P*Mp, D)
@@ -268,8 +200,8 @@ def strong_coefficients(Xs, f, dt, D, J):
     """MANDy (strong form) coefficient tensors, one row per output dim.
 
     The LHS x' is a 3-point central finite difference of each trajectory; the
-    library is sampled pointwise at the interior snapshots where x' is defined.
-    Xs is (P, D, M), as in weak_coefficients.
+    library is sampled pointwise at the interior snapshots. Xs is (P, D, M), as
+    in weak_coefficients.
     """
     Xdot = (Xs[:, :, 2:] - Xs[:, :, :-2]) / (2 * dt)            # (P, D, M-2)
     Theta = feature_tensor(xu.flatten_trajectories(Xs[:, :, 1:-1]), f, phi=None,
@@ -278,21 +210,16 @@ def strong_coefficients(Xs, f, dt, D, J):
                      for d in range(D)])
 
 
-# ---------------------------------------------------------------------------
 # Experiment
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
 
     # ----- parameters -----
     D = 4               # oscillators
     n_traj = 5          # independent trajectories (distinct initial phases)
-    M = 10000            # snapshots per trajectory
-    #M = 1000
+    M = 10000           # snapshots per trajectory
     dt = 0.01           # snapshot spacing
-    #K = 0.5             # coupling strength
-    K = 2
-    #h = 0.5             # pinning amplitude
-    h = 0.2
+    K = 2               # coupling strength
+    h = 0.2             # pinning amplitude
     omega_min = -5.0    # frequencies equidistant on [omega_min, omega_max],
     omega_max = 5.0     # spread wide to keep the phases unlocked
     r_frac = 1.0 / 120.0 # test-fn radius as a fraction of the per-trajectory span
@@ -354,9 +281,8 @@ if __name__ == "__main__":
         xu.rule()
 
         # ----- noise sweep -----
-        # sigma is an ABSOLUTE phase perturbation in radians: the phases are
-        # unwrapped and grow with the time span, so scaling sigma by rms(X) (as the
-        # FPUT and L96 scripts do) would tie the noise level to T.
+        # sigma is an absolute phase perturbation in radians, since the phases
+        # are unwrapped and grow with the time span
         weak_err = np.zeros((noise_levels.size, n_trials))
         strong_err = np.zeros((noise_levels.size, n_trials))
 
@@ -388,15 +314,14 @@ if __name__ == "__main__":
                           f"r_frac={r_frac:.4f}\n"
                           "noise weak_mean weak_std strong_mean strong_std")
 
-    # the figure is drawn from DATA either way, so a rerun and a
-    # replot produce exactly the same plot
+    # the figure is always drawn from DATA, so a rerun and a replot agree
     if not os.path.exists(DATA):
         raise SystemExit(f"{DATA} not found -- set recompute_data = True and rerun")
     noise_levels, wm, ws, sm, ss = np.atleast_2d(np.loadtxt(DATA)).T
 
     # ----- plot -----
 
-    # mean +- one standard deviation over trials, joined into a line
+    # mean +- one standard deviation over trials
     ax = plt.figure(figsize=(7, 5)).gca()
     hw = ax.errorbar(noise_levels, wm, yerr=ws, marker='o', capsize=3,
                      color='C0', ls='-', label='TT-WSINDy (weak form)')

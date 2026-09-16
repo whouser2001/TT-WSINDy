@@ -1,5 +1,5 @@
 """
-Weak form (TT-WSINDy) vs. strong form (MANDy) coefficient accuracy on L96.
+Weak form (TT-WSINDy) vs. strong form (MANDy) coefficient accuracy on Lorenz 96.
 """
 import os, sys
 sys.path.insert(0, '.')
@@ -23,8 +23,7 @@ def gen_L96(x0,t):
 
 # True coeffs
 def true_coeffs(D, J, F):
-    """Exact coefficient tensor of the L96 right-hand side, per output dim.
-    """
+    """Exact coefficient tensor of the L96 right-hand side, per output dim."""
     Ws = []
     for d in range(D):
         # (coefficient, variables multiplied together) for each monomial
@@ -35,9 +34,8 @@ def true_coeffs(D, J, F):
 
         W = np.zeros((J,) * D)
         for coeff, variables in terms:
-            # a repeated index raises that variable's power (D <= 2 aliasing);
-            # two terms landing on the same monomial add, and for D = 3 the two
-            # quadratic terms alias onto each other and cancel exactly
+            # a repeated index raises that variable's power; terms landing on
+            # the same monomial add
             powers = [0] * D
             for v in variables:
                 powers[v] += 1
@@ -54,19 +52,14 @@ def weak_coefficients(X, f, t0, tM, D, J,
                       r_frac=1.0 / 60.0, degree=16):
     """TT-WSINDy (weak form) coefficient tensors, one row per output dim.
 
-    L96 is first order, so one integration by parts moves the single derivative
-    onto the test function: the LHS is -<x, phi'> = <x', phi> (test-function
-    order 1, so dphi is phi'), and the library is convolved with phi. No
-    derivative of the data is computed.
-
     X is (D, M): one trajectory of M snapshots spanning [t0, tM], with the
-    test-function radius a fraction r_frac of that span.
+    test-function radius a fraction r_frac of that span. L96 is first order,
+    so the test function is taken at order 1.
     """
     M = X.shape[1]
     phi, dphi = piecewise_polynomial((tM - t0) * r_frac, degree, t0, tM, M,
                                      order=1)
     Theta = feature_tensor(X, f, phi=phi, low_rank=True)
-    # the order-1 dphi equals phi', so -correlate(x, dphi) = -<x, phi'>
     Y = -1 * correlate(X, np.expand_dims(dphi, axis=0),
                        mode='valid').transpose()                # (Mp, D)
     return np.stack([xu.tt_pi_coeffs(Theta, Y[:, d], (J,) * D)
@@ -75,18 +68,15 @@ def weak_coefficients(X, f, t0, tM, D, J,
 def strong_coefficients(X, f, dt, D, J):
     """MANDy (strong form) coefficient tensors, one row per output dim.
 
-    The LHS x' is a 3-point central finite difference of the trajectory; the
-    library is sampled pointwise at the interior snapshots where x' is defined.
-    X is (D, M), as in weak_coefficients.
+    The LHS x' is a 3-point central finite difference; the library is sampled
+    pointwise at the interior snapshots. X is (D, M), as in weak_coefficients.
     """
     Xdot = (X[:, 2:] - X[:, :-2]) / (2 * dt)                # (D, M-2)
     Theta = feature_tensor(X[:, 1:-1], f, phi=None, low_rank=True)
     return np.stack([xu.tt_pi_coeffs(Theta, Xdot[d], (J,) * D)
                      for d in range(D)])
 
-# -----
-# main
-# -----
+# Experiment
 if __name__ == '__main__':
 
     D = 5
@@ -109,10 +99,10 @@ if __name__ == '__main__':
 
     if recompute_data:
 
-        t = np.arange(M) * dt          # exact spacing dt (linspace(0, M*dt, M) is not)
+        t = np.arange(M) * dt          # exact spacing dt
         t0, tM = t[0], t[-1]
-        x0 = F * np.ones(D)            # equilibrium: L96(F*ones) == 0 exactly,
-        x0[0] += 0.01                  # so perturb to leave it and reach the attractor
+        x0 = F * np.ones(D)            # perturbed off the equilibrium F*ones,
+        x0[0] += 0.01                  # so the orbit reaches the attractor
         X = gen_L96(x0, t)
 
         # ----- clean-data check -----
@@ -158,8 +148,7 @@ if __name__ == '__main__':
                             f" r_frac={r_frac:.4f}\n"
                             "noise weak_mean weak_std strong_mean strong_std")
 
-    # the figure is drawn from DATA either way, so a rerun and a
-    # replot produce exactly the same plot
+    # the figure is always drawn from DATA, so a rerun and a replot agree
     if not os.path.exists(DATA):
         raise SystemExit(f"{DATA} not found -- set recompute_data = True and rerun")
     noise_levels, wm, ws, sm, ss = np.atleast_2d(np.loadtxt(DATA)).T
@@ -168,7 +157,7 @@ if __name__ == '__main__':
     floor = max(noise_levels[1] / 10, 1e-6)   # x-position for the sigma=0 point
     x_axis = np.where(noise_levels > 0, noise_levels, floor)
 
-    # mean +- one standard deviation over trials, joined into a line
+    # mean +- one standard deviation over trials
     ax = plt.figure(figsize=(7, 5)).gca()
     hw = ax.errorbar(x_axis, wm, yerr=ws, marker='o', capsize=3,
                      color='C0', ls='-', label='TT-WSINDy (weak form)')

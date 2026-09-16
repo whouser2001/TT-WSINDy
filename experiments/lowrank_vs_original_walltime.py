@@ -14,7 +14,6 @@ from scipy.integrate import odeint
 from ttwsindy import TT_WSINDy
 import exputils as xu
 
-# ------------- model -------------
 F = 8.0                 # Lorenz-96 forcing
 C = 1.0                 # linear damping coefficient
 
@@ -26,7 +25,6 @@ f      = [lambda x: 1, lambda x: x]
 LABELS = ['', 'x{}']          # one per library function, {} = dimension
 xu.check_labels(f, LABELS)
 
-# ------------- sampling / test function -------------
 T0     = 0.0
 DT     = 0.05
 BURN   = 20.0           # integrated away before sampling, to land on the attractor
@@ -36,11 +34,8 @@ DEGREE = 16             # test function degree
 TTlambs   = np.linspace(1e-5, 5e-1, 10)   # coarse TT-MSTLS thresholds
 flatlambs = np.linspace(1e-5, 1e-1, 10)   # fine matrix-MSTLS thresholds
 
-# sub machine-precision truncation parameter, so that scikit-tt
-# does a thin SVD but does not truncate singular values
 EPS = 1e-300
 
-# ------------- sweeps -------------
 RESULTS = os.path.join(_HERE, 'results')
 DATA    = f'{RESULTS}/ranktruncation.txt'
 
@@ -50,7 +45,6 @@ D_FIXED   = 8
 DS        = [4, 5, 6, 7, 8, 9]
 M_FIXED   = 5000
 
-# so an error is not thrown when memory is exceeded
 MEM_BUDGET_GB = 10.5
 
 def fits_in_memory(D, M):
@@ -60,15 +54,14 @@ def fits_in_memory(D, M):
 def simulate(D, M, seed=0):
     """Integrate Lorenz-96 to a D x M data matrix, sampled on the attractor.
 
-    The step is DT, so the window tM - t0 = DT*M lengthens with M rather than
-    the grid refining. Returns the data together with the sampling window and
-    the test-function radius fraction TAPS/M, which pins phi at TAPS*DT time
-    units for every M.
+    The step is DT, so a larger M lengthens the window rather than refining
+    the grid. Returns the data with the sampling window and the test-function
+    radius fraction TAPS/M, which pins phi at TAPS*DT time units for every M.
     """
     tM = T0 + DT*M
     rng = np.random.default_rng(seed)
     x0 = (F/C)*np.ones(D) + 0.01*rng.standard_normal(D)
-    x0 = odeint(L96, x0, np.linspace(0, BURN, 1000))[-1]     # burn in to attractor
+    x0 = odeint(L96, x0, np.linspace(0, BURN, 1000))[-1]
     X = odeint(L96, x0, np.linspace(T0, tM, M)).T
     return X, T0, tM, TAPS/M
 
@@ -139,29 +132,23 @@ def load_data():
 def extrapolate_dense(M_meas, t_meas, M_pred):
     """Extrapolate the original construction's walltime past its memory wall.
 
-    Fits t(M) = a + b*M + c*M^2 by least squares to the measured points: a
-    fixed per-D overhead, a term linear in M (the correlations and the target),
-    and the quadratic term from the dense M x J x M cores, which is what
-    eventually dominates. Over the measured range 500 <= M <= 10000 at D=8 the
-    fit holds every point to within 5.4%; the pure power law and the pure
-    a + c*M^2 model are both markedly worse.
+    Fits t(M) = a + b*M + c*M^2 by least squares to the measured points, the
+    quadratic term coming from the dense M x J x M cores.
     """
     A = np.vstack([np.ones_like(M_meas), M_meas, M_meas**2]).T
     coef, *_ = np.linalg.lstsq(A, t_meas, rcond=None)
     return np.vstack([np.ones_like(M_pred), M_pred, M_pred**2]).T @ coef
 
-# ------------- main -------------
+# Experiment
 if __name__ == '__main__':
 
-    recompute_data = False   # cached in results/ranktruncation.txt
+    recompute_data = False
     nAvg = 10
 
     if recompute_data:
-        # vs M, at D = D_FIXED (skip the original construction once it OOMs)
         m_dense, m_low = sweep(
             [(D_FIXED, M) for M in MS], nAvg, run_dense=fits_in_memory,
         )
-        # vs D, at M = M_FIXED
         d_dense, d_low = sweep(
             [(D, M_FIXED) for D in DS], nAvg, run_dense=fits_in_memory,
         )
@@ -171,15 +158,13 @@ if __name__ == '__main__':
 
     fig, (axM, axD) = plt.subplots(1, 2, figsize=(12, 5))
 
-    # --- vs M (D fixed): the original construction stops at its memory wall,
-    # and is extrapolated (dotted) over the M it cannot be run at
+    # --- vs M (D fixed)
     measured = np.array([fits_in_memory(D_FIXED, M) for M in MS])
     MS_arr = np.array(MS, dtype=float)
     t_pred = extrapolate_dense(MS_arr[measured], m_dense[measured],
                                MS_arr[~measured])
     axM.plot(MS_arr[measured], m_dense[measured], marker='o', color='blue',
              label='Original construction')
-    # prepend the last measured point so the dotted segment continues the solid one
     axM.plot(np.r_[MS_arr[measured][-1], MS_arr[~measured]],
              np.r_[m_dense[measured][-1], t_pred],
              marker='o', mfc='none', color='blue', ls='dotted',
@@ -195,7 +180,7 @@ if __name__ == '__main__':
     axM.grid(True, which='both', ls=':', alpha=0.5)
     axM.legend()
 
-    # --- vs D (M fixed); the dense arm is drawn only where it was measured
+    # --- vs D (M fixed)
     dense_run = np.array([fits_in_memory(D, M_FIXED) for D in DS])
     DS_arr = np.array(DS, dtype=float)
     axD.plot(DS_arr[dense_run], d_dense[dense_run], marker='o', color='blue',
@@ -209,16 +194,11 @@ if __name__ == '__main__':
     axD.grid(True, which='both', ls=':', alpha=0.5)
     axD.legend()
 
-    # readable decimal labels on the log axes, rather than a lone 10^0.
-    # ScalarFormatter picks its precision from the tick set and renders 0.5 as
-    # "0" on the narrower left panel, so format each tick with %g instead.
     for ax in (axM, axD):
         ax.yaxis.set_major_locator(LogLocator(base=10.0, subs=(1.0, 2.0, 5.0)))
         ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f'{y:g}'))
         ax.yaxis.set_minor_formatter(NullFormatter())
 
-    #fig.suptitle('Feature-tensor construction walltimes, both arms compressed '
-    #             f'($\\epsilon = 10^{{{int(np.log10(EPS))}}}$, nothing truncated)')
     fig.tight_layout()
     fig.savefig(f'{RESULTS}/ranktruncation.png', dpi=150)
     plt.show()

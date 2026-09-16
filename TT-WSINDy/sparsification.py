@@ -13,16 +13,13 @@ def tensor_loss(W, W0prod, Theta, supp_ratio, W0Theta_norm):
     """
     MSTLS loss for a tensor-train coefficient estimate.
 
-    Penalizes the change in fit relative to the non-thresholded estimate,
-    while rewarding a smaller support.
-
     Parameters
     ----------
     W : TT
         Current coefficient estimate, embedded to full size [J]^D.
     W0prod : np.ndarray
         Non-thresholded estimate contracted with Theta, W_contract(W0, Theta).
-        Precomputed once (it is fixed across the lambda sweep) and passed in.
+        Fixed across the lambda sweep, so precomputed once and passed in.
     Theta : TT
         Feature tensor being regressed against, [J]^D x Mp.
     supp_ratio : float
@@ -62,10 +59,10 @@ def TT_MSTLS(Theta, x, lambs, total_size, verbose=False, one_pass=False, pi_fact
     verbose : bool
         If True, print per-threshold diagnostics.
     one_pass : bool
-        If True, only performs a single regression/sparsification step.
+        If True, perform a single regression/sparsification step only.
     pi_factors : tuple, optional
-        Precomputed pseudoinverse SVD factors for
-        the one_pass solve. Ignored by the iterative path.
+        Precomputed pseudoinverse SVD factors for the one_pass solve. Ignored
+        by the iterative path.
 
     Returns
     -------
@@ -166,10 +163,6 @@ def STLS(G, b, lamb, w_LS):
     """
     Sequential thresholding least squares (STLS) with index tracking.
 
-    Iteratively keeps coefficients whose magnitude falls within a per-column
-    band [LB, UB] and re-solves on the surviving columns until the support
-    stabilizes.
-
     Parameters
     ----------
     G : np.ndarray
@@ -195,9 +188,9 @@ def STLS(G, b, lamb, w_LS):
 
     col_norms = la.norm(G, axis=0)
     col_norms[col_norms == 0] = 1.0                 # guard against zero-norm columns
-    bound = la.norm(b) / col_norms                  # ||b|| / ||G_k|| per column
+    bound = la.norm(b) / col_norms
     LB = lamb * np.maximum(1.0, bound)              # per-column lower band
-    UB = (1.0 / lamb) * np.minimum(1.0, bound)      # per-column upper band   
+    UB = (1.0 / lamb) * np.minimum(1.0, bound)      # per-column upper band
 
     w = np.asarray(w_LS, dtype=float).copy()
     active_prev = None
@@ -222,7 +215,7 @@ def MSTLS(G, b, lambs, verbose=False):
     Flat (matrix) MSTLS on the reduced library from TT-MSTLS.
 
     Sweep over threshold values, run STLS at each, and keep the support with
-    the lowest loss (relative fit difference plus support ratio).
+    the lowest loss.
 
     Parameters
     ----------
@@ -242,7 +235,7 @@ def MSTLS(G, b, lambs, verbose=False):
     suppStar : np.ndarray
         Indices of the surviving columns into G.
     """
-    Jtilde = G.shape[1] # G : M' x prod(Jd)
+    Jtilde = G.shape[1]
     w0, *_ = la.lstsq(G, b, rcond=None)
     Gw0 = G @ w0
     Gw0_norm = la.norm(Gw0)
@@ -257,11 +250,9 @@ def MSTLS(G, b, lambs, verbose=False):
         wLa, GLa, suppLa = STLS(G, b, lamb, w0)
 
         if wLa is None:
-            loss = np.inf   # empty supprt
+            loss = np.inf   # empty support
         else:
             GwLa = GLa @ wLa
-
-            # Compute loss
             diffnorm = la.norm(GwLa - Gw0)/Gw0_norm
             suppratio = len(suppLa)/Jtilde
             loss = diffnorm + suppratio

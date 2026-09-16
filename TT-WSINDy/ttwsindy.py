@@ -23,11 +23,11 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
                 timings=None):
     """
     TT-WSINDy.
- 
+
     Discover the governing equations of a dynamical system from data using
     weak-form SINDy with tensor-train sparsification: a coarse TT-MSTLS pass
     per dimension, followed by a fine matrix MSTLS solve.
- 
+
     Parameters
     ----------
     X : np.ndarray
@@ -45,18 +45,18 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
         Currently supported:
             1.  name : piecewise_polynomial
                 r : float
-                    real number in (0, 1] giving the fraction of the time
-                    interval the test function spans
+                    Fraction in (0, 1] of the time interval the test function
+                    spans.
                 p : int
-                    degree of the polynomial
+                    Degree of the polynomial.
                 o : int
-                    order of the ODE to be discovered. An oth-order ODE
+                    Order of the ODE to be discovered. An oth-order ODE
                     requires 'dphi' to be the oth-order derivative.
             2.  name : manual
                 phi : np.array
-                    discretized phi data
+                    Discretized phi data.
                 dphi: np.array
-                    discretized phi derivative data
+                    Discretized phi derivative data.
     loss : str
         Loss function. Currently supported:
             1. name : default
@@ -71,23 +71,17 @@ def TT_WSINDy(X, t0, tM, f, TTlambs, flatlambs,
             2 : additionally print weights, support, and loss at every
                 tested lambda (debug)
     low_rank : bool
-        If true, builds feature tensor directly in compressed
-        form by a left-to-right SVD sweep over a small "carry" matrix.
+        If True, build the feature tensor directly in compressed form.
         Preferred when M is large.
     one_pass : bool
-        If true, performs TT-STLS non-iteratively; only performing
-        a single regression/sparsification step.
-        Preferred roughly when J^D is of the order 10^3 or smaller.
+        If True, perform TT-STLS non-iteratively, as a single
+        regression/sparsification step.
     timings : dict, optional
-        If a dict is given, a per-stage wall-clock breakdown of the run is
-        written into it. Keys: 'feature_tensor' (compressed-TT construction),
-        'pi_factors' (the single global TT-PI SVD taken up front when
-        one_pass, else 0.0 -- with one_pass this is usually the dominant
-        stage), 'tt_mstls' and 'mstls' (the coarse and fine sparsification
-        loops, matching the returned cumulative times), 'library_rebuild'
-        (re-forming and convolving the flat G on each coarse support) and
-        'total', plus 'ranks', the feature tensor's TT bond ranks as built. The stages sum to 'total' up to small unattributed bits
-        (test function, the Y convolution, bookkeeping).
+        If given, a per-stage wall-clock breakdown of the run is written into
+        it, under the keys 'feature_tensor', 'pi_factors', 'tt_mstls',
+        'mstls', 'library_rebuild' and 'total', along with 'ranks', the
+        feature tensor's TT bond ranks as built. The stages sum to 'total' up
+        to small unattributed remainders.
 
     Returns
     -------

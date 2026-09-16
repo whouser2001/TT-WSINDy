@@ -1,5 +1,5 @@
 """
-Weak form (TT-WSINDy) vs. strong form (MANDy) coefficient accuracy on FPUT.
+Weak form (TT-WSINDy) vs. strong form (MANDy) coefficient accuracy on Fermi-Pasta-Tsingou-Ulam (FPUT).
 """
 import os, sys
 sys.path.insert(0, '.')
@@ -13,24 +13,10 @@ from feature_tensor import feature_tensor
 from test_function import piecewise_polynomial
 import exputils as xu
 
+RTOL = ATOL = 1e-12     
 
-# ---------------------------------------------------------------------------
-# FPUT trajectory generator (adaptive high-order odeint, fixed walls)
-# ---------------------------------------------------------------------------
-# The integrator is deliberately NOT velocity-Verlet at step dt. Verlet's own
-# update rule is algebraically identical to the 3-point central second
-# difference,
-#     x_{k+1} - 2 x_k + x_{k-1} = dt^2 F(x_k)     (exactly, no O(dt^2) term),
-# so MANDy's finite-difference LHS would just be the generator's update rule
-# rearranged, and its clean-data error would collapse to roundoff (~1e-14) for
-# reasons that have nothing to do with finite differencing. An adaptive
-# high-order integrator shares no such identity with the stencil, so MANDy pays
-# its genuine O(dt^2) truncation error and the clean-limit comparison against
-# the weak form's quadrature floor is meaningful.
-RTOL = ATOL = 1e-12     # far below the O(dt^2) stencil error (~1e-4), so the
-                        # finite difference, not the integrator, sets MANDy's floor
 def _fpu_force(x, beta):
-    """Acceleration field F(x) with fixed walls x_{-1} = x_n = 0."""
+    """Acceleration field with fixed walls."""
     xp = np.concatenate(([0.0], x, [0.0]))
     dr = xp[2:] - xp[1:-1]          # x_{i+1} - x_i
     dl = xp[1:-1] - xp[:-2]         # x_i - x_{i-1}
@@ -38,12 +24,12 @@ def _fpu_force(x, beta):
 
 
 def _fpu_rhs(z, t, n, beta):
-    """First-order form of x'' = F(x): state z = [x, v], so z' = [v, F(x)]."""
+    """First-order form of the equations of motion, with state z = [x, v]."""
     return np.concatenate((z[n:], _fpu_force(z[:n], beta)))
 
 
 def fpu_energy(x, v, beta):
-    """Total Hamiltonian H = 1/2 |v|^2 + U(x) of one configuration."""
+    """Total Hamiltonian of one configuration."""
     xp = np.concatenate(([0.0], x, [0.0]))
     d = xp[1:] - xp[:-1]
     U = np.sum(0.5 * d ** 2 + (beta / 4.0) * d ** 4)
@@ -60,16 +46,14 @@ def fput_trajectory(n, m, dt=0.015, beta=0.7, amplitude=3.0, seed=0):
     m : int
         Number of recorded snapshots (spaced by dt).
     dt : float
-        Spacing between recorded snapshots. Not an integrator step: odeint
-        chooses its own adaptive steps, which is what leaves MANDy's central
-        second difference with a real O(dt^2) truncation error.
+        Spacing between recorded snapshots, not an integrator step: odeint
+        chooses its own adaptive steps.
     beta : float
         Cubic coupling strength.
     amplitude : float
         Half-width of the uniform random initial displacement box. Larger
-        amplitude raises the energy, exciting more monomials so the candidate
-        library becomes full rank (see the identifiability note in the module
-        docstring). Released from rest (v0 = 0).
+        amplitude raises the energy, exciting more monomials, so the candidate
+        library becomes full rank. Released from rest.
     seed : int
         RNG seed for the random initial condition.
 
@@ -109,14 +93,6 @@ def fput_trajectories(n, m, n_traj, dt=0.015, beta=0.7, amplitude=3.0, seed=0):
     t = trajs[0][0]
     return t, np.stack([x for _, x, _ in trajs]), np.stack([v for _, _, v in trajs])
 
-
-# ---------------------------------------------------------------------------
-# True coefficient tensor (exact expansion of the FPUT force)
-# ---------------------------------------------------------------------------
-# A polynomial is a dict {monomial: coeff}, where a monomial is a sorted tuple
-# of (oscillator_index, power) pairs. With f = {1, x, x^2, x^3} the candidate
-# index in a dimension equals the power of that oscillator, so a monomial maps
-# directly onto an entry of the (J,)*D coefficient tensor.
 def _poly_add(p, q):
     r = dict(p)
     for k, v in q.items():
@@ -143,14 +119,12 @@ def true_coeffs(D, J, beta):
     Returns
     -------
     Ws : list of ndarray
-        Ws[i] is the (J,)*D coefficient tensor of oscillator i's equation,
-        i.e. Ws[i][j_0, ..., j_{D-1}] is the coefficient of
-        prod_d f[j_d](x_d) in x_i''.
+        Ws[i] is the (J,)*D coefficient tensor of oscillator i's equation.
     """
     Ws = []
     for i in range(D):
         L, R = i - 1, i + 1
-        # linear forms dr = x_R - x_i and dl = x_i - x_L (walls drop a term)
+        # linear forms dr and dl (a wall drops a term)
         dr = {}
         if R <= D - 1:
             dr[((R, 1),)] = dr.get(((R, 1),), 0.0) + 1.0
@@ -160,11 +134,11 @@ def true_coeffs(D, J, beta):
         if L >= 0:
             dl[((L, 1),)] = dl.get(((L, 1),), 0.0) - 1.0
 
-        lin = _poly_add(dr, _poly_scale(dl, -1.0))            # dr - dl
+        lin = _poly_add(dr, _poly_scale(dl, -1.0))
         dr3 = _poly_mul(_poly_mul(dr, dr), dr)
         dl3 = _poly_mul(_poly_mul(dl, dl), dl)
         cub = _poly_scale(_poly_add(dr3, _poly_scale(dl3, -1.0)), beta)
-        force = _poly_add(lin, cub)                           # (dr-dl)+beta(...)
+        force = _poly_add(lin, cub)
 
         W = np.zeros((J,) * D)
         for mono, coeff in force.items():
@@ -175,28 +149,21 @@ def true_coeffs(D, J, beta):
         Ws.append(W)
     return Ws
 
-# ---------------------------------------------------------------------------
-# TT-PI regression -> dense, true-scale coefficient tensor
-# ---------------------------------------------------------------------------
 def weak_coefficients(Xs, f, t0, tM, D, J,
                       r_frac=1.0 / 60.0, degree=16):
     """TT-WSINDy (weak form) coefficient tensors, one row per output dim.
 
-    The LHS is the weak projection <x, phi''> (test-function order 2, so phi''
-    carries both derivatives); the library is convolved with phi. No derivative
-    of the data is computed.
-
-    Xs is (P, D, M): P trajectories, each of M snapshots spanning [t0, tM]. The
-    test-function radius is a fraction r_frac of that per-trajectory span, and
-    both the library and the LHS are convolved one trajectory at a time, so no
-    weak-form row straddles a trajectory boundary.
+    Xs is (P, D, M): P trajectories, each of M snapshots spanning [t0, tM].
+    The test-function radius is a fraction r_frac of that per-trajectory span,
+    and both the library and the LHS are convolved one trajectory at a time, so
+    no weak-form row straddles a trajectory boundary. FPUT is second order, so
+    the test function is taken at order 2.
     """
     M = Xs.shape[2]
     phi, dphi = piecewise_polynomial((tM - t0) * r_frac, degree, t0, tM, M,
                                      order=2)
     Theta = feature_tensor(xu.flatten_trajectories(Xs), f, phi=phi, low_rank=True,
                            n_traj=Xs.shape[0])
-    # the order-2 dphi equals -phi'', so -correlate(x, dphi) = <x, phi''>
     Y = -1 * np.concatenate(
         [correlate(X, np.expand_dims(dphi, axis=0), mode='valid') for X in Xs],
         axis=1).transpose()                                     # (P*Mp, D)
@@ -208,8 +175,8 @@ def strong_coefficients(Xs, f, dt, D, J):
     """MANDy (strong form) coefficient tensors, one row per output dim.
 
     The LHS x'' is a 3-point central finite difference of each trajectory; the
-    library is sampled pointwise at the interior snapshots where x'' is defined.
-    Xs is (P, D, M), as in weak_coefficients.
+    library is sampled pointwise at the interior snapshots. Xs is (P, D, M), as
+    in weak_coefficients.
     """
     Xddot = (Xs[:, :, 2:] - 2 * Xs[:, :, 1:-1]
              + Xs[:, :, :-2]) / dt ** 2                         # (P, D, M-2)
@@ -218,13 +185,10 @@ def strong_coefficients(Xs, f, dt, D, J):
     return np.stack([xu.tt_pi_coeffs(Theta, Xddot[:, d, :].ravel(), (J,) * D)
                      for d in range(D)])
 
-
-# ---------------------------------------------------------------------------
 # Experiment
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
 
-    # ----- parameters (D=4 "balanced" regime: full rank + resolved weak form) -----
+    # ----- parameters -----
     D = 4               # oscillators
     n_traj = 6          # independent trajectories (distinct initial conditions)
     M = 10000           # snapshots per trajectory
@@ -234,7 +198,6 @@ if __name__ == "__main__":
     r_frac = 1.0 / 120.0 # test-fn radius as a fraction of the per-trajectory span
     degree = 16         # test-function polynomial degree
 
-    #noise_levels = np.array([1e-1])
     noise_levels = np.array([1e-5, 1e-4, 1e-3, 1e-2, 5e-2, 1e-1, 2e-1, 4e-1])
     n_trials = 40       # noise realizations averaged per level
 
@@ -301,7 +264,6 @@ if __name__ == "__main__":
         for i, sigma in enumerate(noise_levels):
             for tr in range(n_trials):
                 rng = np.random.default_rng(1000 * i + tr)
-                #Xn = Xs + sigma * xstd * rng.standard_normal(Xs.shape)
                 Xn = Xs + sigma * xfrob_normalized * rng.standard_normal(Xs.shape)
                 Ww = weak_coefficients(Xn, f, t0, tM, D, J, r_frac=r_frac,
                                        degree=degree)
@@ -323,8 +285,7 @@ if __name__ == "__main__":
                           f"amplitude={amplitude} r_frac={r_frac:.4f}\n"
                           "noise weak_mean weak_std strong_mean strong_std")
 
-    # the figure is drawn from DATA either way, so a rerun and a
-    # replot produce exactly the same plot
+    # the figure is always drawn from DATA, so a rerun and a replot agree
     if not os.path.exists(DATA):
         raise SystemExit(f"{DATA} not found -- set recompute_data = True and rerun")
     noise_levels, wm, ws, sm, ss = np.atleast_2d(np.loadtxt(DATA)).T
@@ -333,7 +294,7 @@ if __name__ == "__main__":
     floor = max(noise_levels[1] / 10, 1e-6)   # x-position for the sigma=0 point
     x_axis = np.where(noise_levels > 0, noise_levels, floor)
 
-    # mean +- one standard deviation over trials, joined into a line
+    # mean +- one standard deviation over trials
     ax = plt.figure(figsize=(7, 5)).gca()
     hw = ax.errorbar(x_axis, wm, yerr=ws, marker='o', capsize=3,
                      color='C0', ls='-', label='TT-WSINDy (weak form)')
